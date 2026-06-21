@@ -1,0 +1,11 @@
+name = "shared-pond"
+main = "src/worker.js"
+compatibility_date = "2024-09-23"
+
+[[durable_objects.bindings]]
+name = "POND"
+class_name = "PondRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PondRoom"]
