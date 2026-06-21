@@ -81,6 +81,18 @@ class Wave {
       }
     }
 
+    // apply force to lotuses (player avatars)
+    for (const l of lotuses) {
+      const d = dist(this.x, this.y, l.x, l.y);
+      if (d > this.radius - 50 && d < this.radius + 50) {
+        const angle = Math.atan2(l.y - this.y, l.x - this.x);
+        const inSplash = Math.abs(((angle - this.splashAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI) < this.splashSpread;
+        const power = this.force * waveStrength * (inSplash ? 2.0 : 0.8);
+        l.vx += Math.cos(angle) * power * 0.12;
+        l.vy += Math.sin(angle) * power * 0.12;
+      }
+    }
+
     // damage lily pads — only once per lily per wave, and only at peak strength
     for (let i = lilies.length - 1; i >= 0; i--) {
       const l = lilies[i];
@@ -270,7 +282,7 @@ function rollFishTier() {
 
 // ===== ENTITY: FISH =====
 class Fish {
-  constructor(x, y, tier) {
+  constructor(x, y, tier, isPlayer) {
     this.type = 'fish';
     this.x = x;
     this.y = y;
@@ -293,6 +305,8 @@ class Fish {
     this.eatTarget = null;
     this.eatCooldown = 0;
     this.growthScale = 1;
+    this.isPlayer = !!isPlayer;
+    this.name = '';
   }
 
   update(dt) {
@@ -446,6 +460,27 @@ class Fish {
     ctx.fill();
 
     ctx.restore();
+
+    // player name tag (drawn unrotated)
+    if (this.isPlayer && this.name) {
+      ctx.save();
+      ctx.globalAlpha = this.life;
+      ctx.fillStyle = 'rgba(0, 245, 212, 0.9)';
+      ctx.font = 'bold 10px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(this.name, this.x, this.y - sz * 1.3);
+      // small crown indicator
+      ctx.fillStyle = 'rgba(255, 215, 0, 0.8)';
+      ctx.beginPath();
+      ctx.moveTo(this.x - sz * 0.4, this.y - sz * 1.1);
+      ctx.lineTo(this.x - sz * 0.2, this.y - sz * 1.5);
+      ctx.lineTo(this.x, this.y - sz * 1.1);
+      ctx.lineTo(this.x + sz * 0.2, this.y - sz * 1.5);
+      ctx.lineTo(this.x + sz * 0.4, this.y - sz * 1.1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
     ctx.globalAlpha = 1;
   }
 }
@@ -1041,6 +1076,11 @@ let foamParticles = [];
 let creatures = [];
 let lilies = [];
 let birds = [];
+let lotuses = [];
+let myLotus = null;
+let myFish = null;
+let isDead = false;
+const respawnBanner = document.getElementById('respawn-banner');
 
 function addWave(x, y, opts) {
   if (waves.length >= MAX_WAVES) waves.shift();
@@ -1260,6 +1300,29 @@ function handlePointerDown(e) {
   isDragging = true;
   lastDragX = p.x;
   lastDragY = p.y;
+
+  // if dead, check if clicking on a fish to respawn
+  if (isDead) {
+    for (const c of creatures) {
+      if (c.type === 'fish' && c.life > 0 && !c.isPlayer) {
+        const d = dist(p.x, p.y, c.x, c.y);
+        if (d < c.size * c.growthScale * 1.5) {
+          c.isPlayer = true;
+          c.name = myUserName;
+          c.decay = 0;
+          c.color = '#00f5d4';
+          myFish = c;
+          isDead = false;
+          respawnBanner.classList.remove('visible');
+          ripples.push(new Ripple(c.x, c.y, { maxRadius: 50 }));
+          sendAction({ type: 'possess', x: normX(c.x), y: normY(c.y) });
+          return;
+        }
+      }
+    }
+    return;
+  }
+
   doAction(p.x, p.y);
   if (!hasInteracted) {
     hasInteracted = true;
@@ -1546,6 +1609,7 @@ function handleMessage(msg) {
         myUserId = msg.you.id;
         myUserName = msg.you.name;
         myNameEl.textContent = '· ' + msg.you.name;
+        if (!myFish) spawnPlayerFish();
       }
       if (msg.users) renderUserList(msg.users);
       break;
@@ -1602,6 +1666,7 @@ function describeAction(action) {
     case 'event': return 'triggered an event';
     case 'wavepool': return 'pressed the red button!';
     case 'birds': return 'summoned birds!';
+    case 'possess': return 'became a fish';
     default: return action.type;
   }
 }
@@ -1611,13 +1676,10 @@ function addFeedItem(name, action) {
   item.className = 'feed-item';
   item.innerHTML = `<span class="feed-name">${escapeHtml(name)}</span> <span class="feed-action">${escapeHtml(action)}</span>`;
   feedEl.appendChild(item);
-  // keep max 6 items
-  while (feedEl.children.length > 6) feedEl.removeChild(feedEl.firstChild);
-  // auto fade after 5s
-  setTimeout(() => {
-    item.classList.add('fadeout');
-    setTimeout(() => item.remove(), 600);
-  }, 5000);
+  // keep max 20 items (persistent log)
+  while (feedEl.children.length > 20) feedEl.removeChild(feedEl.firstChild);
+  // auto-scroll to bottom
+  feedEl.scrollTop = feedEl.scrollHeight;
 }
 
 function escapeHtml(s) {
@@ -1659,6 +1721,19 @@ onlineCountEl.addEventListener('click', () => {
 userPanelClose.addEventListener('click', () => {
   userPanel.classList.remove('visible');
 });
+
+// ===== PLAYER FISH (idle — no control, just lives in the pond) =====
+function spawnPlayerFish() {
+  const x = W * 0.5 + (Math.random() - 0.5) * 100;
+  const y = H * 0.5 + (Math.random() - 0.5) * 100;
+  const fish = new Fish(x, y, 1, true);
+  fish.name = myUserName;
+  fish.decay = 0; // player fish don't decay
+  fish.color = '#00f5d4';
+  creatures.push(fish);
+  myFish = fish;
+  ripples.push(new Ripple(x, y, { maxRadius: 50 }));
+}
 
 function applyRemoteAction(action) {
   const x = action.x !== undefined ? denormX(action.x) : 0;
@@ -1740,6 +1815,13 @@ function loop(now) {
     if (alive) c.draw(ctx);
     return alive;
   });
+
+  // check if player fish died
+  if (myFish && (myFish.life <= 0 || !creatures.includes(myFish))) {
+    myFish = null;
+    isDead = true;
+    respawnBanner.classList.add('visible');
+  }
 
   // birds (above everything — they fly over the pond)
   birds = birds.filter(b => {

@@ -255,8 +255,21 @@ html, body {
   flex-direction: column;
   gap: 4px;
   z-index: 10;
-  pointer-events: none;
+  pointer-events: auto;
   max-width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 245, 212, 0.2) transparent;
+}
+
+#feed::-webkit-scrollbar {
+  width: 4px;
+}
+
+#feed::-webkit-scrollbar-thumb {
+  background: rgba(0, 245, 212, 0.2);
+  border-radius: 2px;
 }
 
 .feed-item {
@@ -270,12 +283,6 @@ html, body {
   font-size: 12px;
   letter-spacing: 0.3px;
   animation: feedSlide 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transition: opacity 0.5s, transform 0.5s;
-}
-
-.feed-item.fadeout {
-  opacity: 0;
-  transform: translateX(20px);
 }
 
 .feed-item .feed-name {
@@ -410,4 +417,37 @@ html, body {
 #my-name {
   color: rgba(0, 245, 212, 0.5);
   font-weight: 500;
+}
+
+/* ===== RESPAWN BANNER ===== */
+#respawn-banner {
+  position: fixed;
+  bottom: 70px;
+  right: 12px;
+  background: rgba(10, 26, 46, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 100, 100, 0.3);
+  border-radius: 10px;
+  padding: 10px 16px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  z-index: 14;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  max-width: 220px;
+  animation: respawnPulse 2s ease-in-out infinite;
+}
+
+#respawn-banner.visible {
+  opacity: 1;
+}
+
+@keyframes respawnPulse {
+  0%, 100% { border-color: rgba(255, 100, 100, 0.3); }
+  50% { border-color: rgba(255, 100, 100, 0.6); }
 }
