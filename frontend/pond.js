@@ -1404,7 +1404,8 @@ updateToolButtons();
 // ===== EVENT SYSTEM =====
 const eventBanner = document.getElementById('event-banner');
 let currentEvent = null;
-let eventTimer = 0;
+let currentEventStart = 0;
+const EVENT_DURATION = 10; // seconds
 let nextEventTime = Date.now() + 30000 + Math.random() * 30000;
 
 const EVENT_TYPES = [
@@ -1427,24 +1428,22 @@ const EVENT_TYPES = [
 
 function updateEvents() {
   if (currentEvent) {
-    eventTimer -= 1;
-    if (eventTimer <= 0) {
-      // event ends
+    const elapsed = (Date.now() - currentEventStart) / 1000;
+    const remaining = Math.max(0, EVENT_DURATION - elapsed);
+    if (remaining <= 0) {
       currentEvent = null;
       eventBanner.classList.remove('visible');
       nextEventTime = Date.now() + 30000 + Math.random() * 30000;
     } else {
-      // update banner text with timer
-      const seconds = Math.ceil(eventTimer / 60);
+      const seconds = Math.ceil(remaining);
       eventBanner.innerHTML = `${currentEvent.text} <span class="event-timer">${seconds}s</span>`;
     }
   } else if (Date.now() > nextEventTime) {
-    // start new event
     const evt = EVENT_TYPES[Math.floor(Math.random() * EVENT_TYPES.length)];
     currentEvent = evt;
-    eventTimer = 600; // ~10 seconds at 60fps
+    currentEventStart = Date.now();
     evt.spawn();
-    eventBanner.innerHTML = `${evt.text} <span class="event-timer">10s</span>`;
+    eventBanner.innerHTML = `${evt.text} <span class="event-timer">${EVENT_DURATION}s</span>`;
     eventBanner.classList.add('visible');
     sendAction({ type: 'event', eventId: evt.id });
   }
@@ -1752,9 +1751,9 @@ function applyRemoteAction(action) {
       const evt = EVENT_TYPES.find(e => e.id === action.eventId);
       if (evt) {
         currentEvent = evt;
-        eventTimer = 600;
+        currentEventStart = Date.now();
         evt.spawn();
-        eventBanner.innerHTML = `${evt.text} <span class="event-timer">10s</span>`;
+        eventBanner.innerHTML = `${evt.text} <span class="event-timer">${EVENT_DURATION}s</span>`;
         eventBanner.classList.add('visible');
       }
       break;
