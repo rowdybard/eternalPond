@@ -1531,7 +1531,10 @@ function scheduleReconnect() {
 
 function sendAction(action) {
   if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+    console.log('[POND] Sending action:', action.type);
     ws.send(JSON.stringify(action));
+  } else {
+    console.log('[POND] Cannot send — WS not connected');
   }
 }
 
