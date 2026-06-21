@@ -1,5 +1,5 @@
 // ===== CONFIG =====
-const WS_URL = 'wss://shared-pond.maxpu.workers.dev/ws';
+const WS_URL = 'wss://shared-pond.maxpug17.workers.dev/ws';
 const MAX_CREATURES = 80;
 const MAX_RIPPLES = 120;
 const MAX_LILIES = 40;
@@ -1495,22 +1495,28 @@ function connectWS() {
   ws.onopen = () => {
     wsConnected = true;
     onlineCountEl.textContent = 'connected';
+    console.log('[POND] WebSocket connected to', WS_URL);
   };
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
+      console.log('[POND] Received:', msg.type, msg.action ? msg.action.type : '');
       handleMessage(msg);
-    } catch (e) {}
+    } catch (e) {
+      console.error('[POND] Parse error:', e);
+    }
   };
 
   ws.onclose = () => {
     wsConnected = false;
     onlineCountEl.textContent = 'offline — solo mode';
+    console.log('[POND] WebSocket closed, reconnecting...');
     scheduleReconnect();
   };
 
-  ws.onerror = () => {
+  ws.onerror = (err) => {
+    console.error('[POND] WebSocket error:', err);
     if (ws) ws.close();
   };
 }
@@ -1557,8 +1563,8 @@ function applySnapshot(state) {
 }
 
 function applyRemoteAction(action) {
-  const x = denormX(action.x);
-  const y = denormY(action.y);
+  const x = action.x !== undefined ? denormX(action.x) : 0;
+  const y = action.y !== undefined ? denormY(action.y) : 0;
   switch (action.type) {
     case 'wave':
       addWave(x, y, { splashAngle: action.splashAngle });
