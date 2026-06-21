@@ -1,5 +1,5 @@
 // ===== CONFIG =====
-const WS_URL = 'wss://shared-pond.maxpug17.workers.dev/ws';
+const WS_URL = 'wss://eternalpond.com/ws';
 const MAX_CREATURES = 80;
 const MAX_RIPPLES = 120;
 const MAX_LILIES = 40;
