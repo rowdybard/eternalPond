@@ -1542,12 +1542,30 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'snapshot':
       applySnapshot(msg.state);
+      if (msg.you) {
+        myUserId = msg.you.id;
+        myUserName = msg.you.name;
+        myNameEl.textContent = '· ' + msg.you.name;
+      }
+      if (msg.users) renderUserList(msg.users);
       break;
     case 'action':
       applyRemoteAction(msg.action);
+      if (msg.action.actorName) {
+        addFeedItem(msg.action.actorName, describeAction(msg.action));
+      }
       break;
     case 'presence':
       onlineCountEl.textContent = `${msg.count} ${msg.count === 1 ? 'person' : 'people'} in the pond`;
+      break;
+    case 'join':
+      addFeedItem(msg.user.name, 'joined the pond');
+      break;
+    case 'leave':
+      addFeedItem(msg.name, 'left the pond');
+      break;
+    case 'users':
+      renderUserList(msg.users);
       break;
   }
 }
@@ -1564,6 +1582,83 @@ function applySnapshot(state) {
     });
   }
 }
+
+// ===== FEED + USER PANEL =====
+let myUserId = null;
+let myUserName = '';
+const feedEl = document.getElementById('feed');
+const myNameEl = document.getElementById('my-name');
+const userPanel = document.getElementById('user-panel');
+const userListEl = document.getElementById('user-list');
+const userPanelClose = document.getElementById('user-panel-close');
+
+const CREATURE_EMOJI = { fish: '\ud83d\udc1f', frog: '\ud83d\udc38', dragonfly: '\ud83e\udd9f', lily: '\ud83c\udf3f' };
+
+function describeAction(action) {
+  switch (action.type) {
+    case 'wave': return 'made a wave';
+    case 'creature': return `spawned a ${CREATURE_EMOJI[action.creatureType] || action.creatureType}`;
+    case 'lily': return 'planted a lily pad';
+    case 'event': return 'triggered an event';
+    case 'wavepool': return 'pressed the red button!';
+    case 'birds': return 'summoned birds!';
+    default: return action.type;
+  }
+}
+
+function addFeedItem(name, action) {
+  const item = document.createElement('div');
+  item.className = 'feed-item';
+  item.innerHTML = `<span class="feed-name">${escapeHtml(name)}</span> <span class="feed-action">${escapeHtml(action)}</span>`;
+  feedEl.appendChild(item);
+  // keep max 6 items
+  while (feedEl.children.length > 6) feedEl.removeChild(feedEl.firstChild);
+  // auto fade after 5s
+  setTimeout(() => {
+    item.classList.add('fadeout');
+    setTimeout(() => item.remove(), 600);
+  }, 5000);
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function renderUserList(users) {
+  userListEl.innerHTML = '';
+  users.forEach(u => {
+    const row = document.createElement('div');
+    row.className = 'user-row' + (u.id === myUserId ? ' me' : '');
+    const counts = u.counts || {};
+    const stats = [];
+    if (counts.wave) stats.push(`\ud83c\udf0a ${counts.wave}`);
+    if (counts.fish) stats.push(`\ud83d\udc1f ${counts.fish}`);
+    if (counts.frog) stats.push(`\ud83d\udc38 ${counts.frog}`);
+    if (counts.dragonfly) stats.push(`\ud83e\udd9f ${counts.dragonfly}`);
+    if (counts.lily) stats.push(`\ud83c\udf3f ${counts.lily}`);
+    const statsHtml = stats.length ? stats.join(' ') : 'just watching';
+    const avatar = u.name.charAt(0).toUpperCase();
+    row.innerHTML = `
+      <div class="user-avatar">${avatar}</div>
+      <div class="user-info">
+        <div class="user-name">${escapeHtml(u.name)}${u.id === myUserId ? ' (you)' : ''}</div>
+        <div class="user-stats">${statsHtml}</div>
+      </div>
+    `;
+    userListEl.appendChild(row);
+  });
+}
+
+// click online count to toggle user panel
+onlineCountEl.style.cursor = 'pointer';
+onlineCountEl.addEventListener('click', () => {
+  userPanel.classList.toggle('visible');
+});
+userPanelClose.addEventListener('click', () => {
+  userPanel.classList.remove('visible');
+});
 
 function applyRemoteAction(action) {
   const x = action.x !== undefined ? denormX(action.x) : 0;
