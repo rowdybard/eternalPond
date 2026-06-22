@@ -1547,7 +1547,7 @@ function addRipple(x, y, opts) {
   ripples.push(new Ripple(x, y, opts));
 }
 
-function addCreature(type, x, y, extra) {
+function addCreature(type, x, y, extra, silent) {
   if (creatures.length >= MAX_CREATURES) creatures.shift();
   let c;
   switch (type) {
@@ -1557,7 +1557,7 @@ function addCreature(type, x, y, extra) {
     default: return;
   }
   creatures.push(c);
-  ripples.push(new Ripple(x, y, { maxRadius: 50 }));
+  if (!silent) ripples.push(new Ripple(x, y, { maxRadius: 50 }));
 
   // if player is dead and a new fish spawns, it becomes the player's fish
   if (isDead && type === 'fish') {
@@ -1574,11 +1574,13 @@ function addCreature(type, x, y, extra) {
 
 let lastLilyPlace = { x: -999, y: -999, time: 0 };
 
-function addLily(x, y) {
+function addLily(x, y, silent) {
   const now = Date.now();
-  // check placement cooldown
-  if (dist(x, y, lastLilyPlace.x, lastLilyPlace.y) < 40 && now - lastLilyPlace.time < LILY_PLACE_COOLDOWN) {
-    return false;
+  if (!silent) {
+    // check placement cooldown
+    if (dist(x, y, lastLilyPlace.x, lastLilyPlace.y) < 40 && now - lastLilyPlace.time < LILY_PLACE_COOLDOWN) {
+      return false;
+    }
   }
   // replace overlapping lily pads
   for (const l of lilies) {
@@ -1591,8 +1593,10 @@ function addLily(x, y) {
     lilies[0].sinking = true;
   }
   lilies.push(new LilyPad(x, y));
-  ripples.push(new Ripple(x, y, { maxRadius: 35 }));
-  lastLilyPlace = { x, y, time: now };
+  if (!silent) {
+    ripples.push(new Ripple(x, y, { maxRadius: 35 }));
+    lastLilyPlace = { x, y, time: now };
+  }
   return true;
 }
 
@@ -2179,32 +2183,38 @@ function connectWS() {
     return;
   }
 
+  // connection timeout — fall back to solo mode if WS doesn't connect in 8s
+  const connectTimeout = setTimeout(() => {
+    if (!wsConnected && ws) {
+      try { ws.close(); } catch(e) {}
+      ws = null;
+      onlineCountEl.textContent = 'offline — solo mode';
+    }
+  }, 8000);
+
   ws.onopen = () => {
+    clearTimeout(connectTimeout);
     wsConnected = true;
     onlineCountEl.textContent = 'connected';
-    console.log('[POND] WebSocket connected to', WS_URL);
   };
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      console.log('[POND] Received:', msg.type, msg.action ? msg.action.type : '');
       handleMessage(msg);
-    } catch (e) {
-      console.error('[POND] Parse error:', e);
-    }
+    } catch (e) {}
   };
 
   ws.onclose = () => {
+    clearTimeout(connectTimeout);
     wsConnected = false;
     onlineCountEl.textContent = 'offline — solo mode';
-    console.log('[POND] WebSocket closed, reconnecting...');
     scheduleReconnect();
   };
 
-  ws.onerror = (err) => {
-    console.error('[POND] WebSocket error:', err);
-    if (ws) ws.close();
+  ws.onerror = () => {
+    clearTimeout(connectTimeout);
+    if (ws) { try { ws.close(); } catch(e) {} }
   };
 }
 
@@ -2218,10 +2228,7 @@ function scheduleReconnect() {
 
 function sendAction(action) {
   if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
-    console.log('[POND] Sending action:', action.type);
-    ws.send(JSON.stringify(action));
-  } else {
-    console.log('[POND] Cannot send — WS not connected');
+    try { ws.send(JSON.stringify(action)); } catch(e) {}
   }
 }
 
@@ -2260,13 +2267,17 @@ function handleMessage(msg) {
 
 function applySnapshot(state) {
   if (state.creatures) {
-    state.creatures.forEach(c => {
-      addCreature(c.type, denormX(c.x), denormY(c.y), c.tier !== undefined ? { tier: c.tier } : undefined);
+    // limit to 20 to avoid massive entity creation spike on connect
+    const creatures = state.creatures.slice(-20);
+    creatures.forEach(c => {
+      addCreature(c.type, denormX(c.x), denormY(c.y), c.tier !== undefined ? { tier: c.tier } : undefined, true);
     });
   }
   if (state.lilies) {
-    state.lilies.forEach(l => {
-      addLily(denormX(l.x), denormY(l.y));
+    // limit to 15 lily pads
+    const lilies = state.lilies.slice(-15);
+    lilies.forEach(l => {
+      addLily(denormX(l.x), denormY(l.y), true);
     });
   }
 }
