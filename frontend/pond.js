@@ -24,6 +24,8 @@ const SURFACE_NOISE_COUNT = LOW_QUALITY ? 30 : 80;
 const GOD_RAY_COUNT = LOW_QUALITY ? 0 : 6;
 const SPECULAR_COUNT = LOW_QUALITY ? 3 : 7;
 const WATER_GRID_ENABLED = !LOW_QUALITY;
+const WATER_GRID_COLS = LOW_QUALITY ? 12 : 24;
+const WATER_GRID_ROWS = LOW_QUALITY ? 8 : 16;
 
 // ===== CANVAS SETUP =====
 const canvas = document.getElementById('pond');
@@ -1620,8 +1622,7 @@ for (let i = 0; i < SURFACE_NOISE_COUNT; i++) {
 }
 
 // ===== AMBIENT WATER DISPLACEMENT GRID =====
-const WATER_GRID_COLS = LOW_QUALITY ? 12 : 24;
-const WATER_GRID_ROWS = LOW_QUALITY ? 8 : 16;
+// WATER_GRID_COLS / WATER_GRID_ROWS declared in config block (needed before resize())
 let waterGrid = [];
 let waterGridW = 0, waterGridH = 0;
 
