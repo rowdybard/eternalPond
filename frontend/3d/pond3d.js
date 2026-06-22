@@ -334,6 +334,18 @@ const ASSETS = {
   bird: '../assets/bird.glb',
   rocks: '../assets/rocks.glb',
   reeds: '../assets/reeds.glb',
+  tree_pine: '../assets/tree_pine.glb',
+  tree_birch: '../assets/tree_birch.glb',
+  tree_maple: '../assets/tree_maple.glb',
+  tree_oak: '../assets/tree_oak.glb',
+  tree_autumn: '../assets/tree_autumn.glb',
+  grass: '../assets/grass.glb',
+  grass_tall: '../assets/grass_tall.glb',
+  bush: '../assets/bush.glb',
+  bush_flowers: '../assets/bush_flowers.glb',
+  flowers: '../assets/flowers.glb',
+  bushes: '../assets/bushes.glb',
+  flower_bushes: '../assets/flower_bushes.glb',
 };
 const assetCache = {};
 const gltfLoader = (typeof THREE.GLTFLoader === 'function') ? new THREE.GLTFLoader() : null;
@@ -1387,32 +1399,206 @@ function buildTerrain(parent, HQ) {
   parent.add(caustic);
 }
 
-function makeTree(scale, glow) {
+// ===== TREE VARIATIONS =====
+// Four distinct low-poly tree types for realistic forest variety.
+// Each has a unique silhouette, trunk shape, and canopy structure.
+
+// Type 1: Tall pine / conifer — narrow tapered trunk with stacked cone canopy
+function makePineTree(scale, glow) {
   const g = new THREE.Group();
-  const trunkH = (7 + Math.random() * 3) * scale;
+  const trunkH = (8 + Math.random() * 4) * scale;
   const trunk = new THREE.Mesh(
-    geo('trunkGeo', () => new THREE.CylinderGeometry(0.42, 0.85, 1, 6)),
+    geo('pineTrunk', () => new THREE.CylinderGeometry(0.32, 0.55, 1, 5)),
+    stdMat(0x3d2a1e, { roughness: 1, flatShading: true })
+  );
+  trunk.scale.set(scale, trunkH, scale);
+  trunk.position.y = trunkH / 2;
+  g.add(trunk);
+
+  const cols = glow ? [0x1a6b48, 0x1e7a52, 0x248a5e] : [0x1a5238, 0x1e6042, 0x226e4a];
+  let topY = trunkH;
+  const layers = 5;
+  for (let k = 0; k < layers; k++) {
+    const r = (2.8 - k * 0.42) * scale;
+    const h = (2.6 - k * 0.15) * scale;
+    const mat = stdMat(cols[k % cols.length], { roughness: 0.9, flatShading: true });
+    if (glow) { mat.emissive = new THREE.Color(0x0a3d28); mat.emissiveIntensity = 0.6; }
+    const cone = new THREE.Mesh(geo('pineCone', () => new THREE.ConeGeometry(1, 1, 7)), mat);
+    cone.scale.set(r, h, r);
+    cone.position.y = trunkH * 0.35 + k * h * 0.65;
+    g.add(cone);
+    topY = cone.position.y + h / 2;
+  }
+  g.userData.topY = topY;
+  return g;
+}
+
+// Type 2: Oak / broadleaf — thick short trunk with large rounded canopy clusters
+function makeOakTree(scale, glow) {
+  const g = new THREE.Group();
+  const trunkH = (5 + Math.random() * 2.5) * scale;
+  const trunk = new THREE.Mesh(
+    geo('oakTrunk', () => new THREE.CylinderGeometry(0.55, 0.95, 1, 6)),
     stdMat(0x4a3528, { roughness: 1, flatShading: true })
   );
   trunk.scale.set(scale, trunkH, scale);
   trunk.position.y = trunkH / 2;
   g.add(trunk);
 
-  const canopyCols = glow ? [0x1f7a5a, 0x2a8f63, 0x36a872] : [0x1c5a3a, 0x246b44, 0x2e7d4f];
+  // branch stubs for character
+  for (let b = 0; b < 2; b++) {
+    const ba = Math.random() * Math.PI * 2;
+    const branch = new THREE.Mesh(
+      geo('oakBranch', () => new THREE.CylinderGeometry(0.18, 0.3, 1, 4)),
+      stdMat(0x4a3528, { roughness: 1, flatShading: true })
+    );
+    const blen = (1.5 + Math.random() * 1.2) * scale;
+    branch.scale.set(scale, blen, scale);
+    branch.position.set(Math.cos(ba) * 0.5 * scale, trunkH * 0.7, Math.sin(ba) * 0.5 * scale);
+    branch.rotation.z = Math.cos(ba) * 0.5;
+    branch.rotation.x = Math.sin(ba) * 0.5;
+    g.add(branch);
+  }
+
+  const cols = glow ? [0x2a8f63, 0x36a872, 0x2e9a5a] : [0x2a6b44, 0x246b44, 0x2e7d4f];
   let topY = trunkH;
-  for (let k = 0; k < 3; k++) {
-    const r = (3.4 - k * 0.7) * scale;
-    const mat = stdMat(canopyCols[k], { roughness: 0.85, flatShading: true });
+  const clusters = 4 + Math.floor(Math.random() * 2);
+  for (let k = 0; k < clusters; k++) {
+    const r = (2.8 - k * 0.3) * scale;
+    const mat = stdMat(cols[k % cols.length], { roughness: 0.85, flatShading: true });
     if (glow) { mat.emissive = new THREE.Color(0x0e4732); mat.emissiveIntensity = 0.7; }
-    const can = new THREE.Mesh(geo('canopyGeo', () => new THREE.IcosahedronGeometry(1, 0)), mat);
-    can.scale.setScalar(r);
-    can.position.y = trunkH + k * 2.1 * scale - 0.4;
+    const can = new THREE.Mesh(geo('oakCanopy', () => new THREE.IcosahedronGeometry(1, 0)), mat);
+    can.scale.set(r, r * 0.82, r);
+    const ang = (k / clusters) * Math.PI * 2 + Math.random() * 0.5;
+    const offR = k === 0 ? 0 : (1.2 + Math.random() * 0.8) * scale;
+    can.position.set(Math.cos(ang) * offR, trunkH + k * 0.8 * scale + 0.5 * scale, Math.sin(ang) * offR);
     can.rotation.set(Math.random(), Math.random() * 6.28, Math.random());
     g.add(can);
-    topY = can.position.y + r;
+    topY = Math.max(topY, can.position.y + r * 0.82);
   }
   g.userData.topY = topY;
   return g;
+}
+
+// Type 3: Birch / slender — thin tapering trunk with small sparse canopy
+function makeBirchTree(scale, glow) {
+  const g = new THREE.Group();
+  const trunkH = (9 + Math.random() * 3) * scale;
+  const trunk = new THREE.Mesh(
+    geo('birchTrunk', () => new THREE.CylinderGeometry(0.22, 0.38, 1, 6)),
+    stdMat(0xd4cfc0, { roughness: 0.9, flatShading: true })
+  );
+  trunk.scale.set(scale, trunkH, scale);
+  trunk.position.y = trunkH / 2;
+  g.add(trunk);
+
+  // birch bark dark patches
+  for (let p = 0; p < 3; p++) {
+    const patch = new THREE.Mesh(
+      geo('birchPatch', () => new THREE.CylinderGeometry(0.39, 0.39, 0.3, 6, 1, true)),
+      stdMat(0x2a2520, { roughness: 1, flatShading: true })
+    );
+    patch.scale.set(scale, scale, scale);
+    patch.position.y = trunkH * (0.2 + p * 0.25);
+    patch.rotation.y = Math.random() * 6.28;
+    g.add(patch);
+  }
+
+  const cols = glow ? [0x3a9a6a, 0x44b07a, 0x2e8a5a] : [0x3a7a54, 0x348a5e, 0x2e7d4f];
+  let topY = trunkH;
+  const clusters = 3;
+  for (let k = 0; k < clusters; k++) {
+    const r = (1.8 - k * 0.3) * scale;
+    const mat = stdMat(cols[k % cols.length], { roughness: 0.8, flatShading: true });
+    if (glow) { mat.emissive = new THREE.Color(0x0e4732); mat.emissiveIntensity = 0.6; }
+    const can = new THREE.Mesh(geo('birchCanopy', () => new THREE.IcosahedronGeometry(1, 0)), mat);
+    can.scale.set(r, r * 0.75, r);
+    const ang = (k / clusters) * Math.PI * 2 + Math.random();
+    const offR = (0.8 + Math.random() * 0.6) * scale;
+    can.position.set(Math.cos(ang) * offR, trunkH - 0.5 * scale + k * 1.2 * scale, Math.sin(ang) * offR);
+    can.rotation.set(Math.random(), Math.random() * 6.28, Math.random());
+    g.add(can);
+    topY = Math.max(topY, can.position.y + r * 0.75);
+  }
+  g.userData.topY = topY;
+  return g;
+}
+
+// Type 4: Willow / drooping — curved trunk with cascading leaf curtains
+function makeWillowTree(scale, glow) {
+  const g = new THREE.Group();
+  const trunkH = (6 + Math.random() * 2) * scale;
+  const trunk = new THREE.Mesh(
+    geo('willowTrunk', () => new THREE.CylinderGeometry(0.38, 0.65, 1, 5)),
+    stdMat(0x5a4a38, { roughness: 1, flatShading: true })
+  );
+  trunk.scale.set(scale, trunkH, scale);
+  trunk.position.y = trunkH / 2;
+  // slight lean
+  trunk.rotation.z = (Math.random() - 0.5) * 0.15;
+  g.add(trunk);
+
+  const cols = glow ? [0x2a8a5a, 0x34a06a, 0x247a4a] : [0x2a6a44, 0x246640, 0x1e5a3a];
+  let topY = trunkH;
+
+  // inner canopy cluster
+  const innerMat = stdMat(cols[0], { roughness: 0.85, flatShading: true });
+  if (glow) { innerMat.emissive = new THREE.Color(0x0e4732); innerMat.emissiveIntensity = 0.6; }
+  const inner = new THREE.Mesh(geo('willowInner', () => new THREE.IcosahedronGeometry(1, 0)), innerMat);
+  inner.scale.set(2.2 * scale, 1.6 * scale, 2.2 * scale);
+  inner.position.y = trunkH + 0.5 * scale;
+  inner.rotation.set(Math.random(), Math.random() * 6.28, Math.random());
+  g.add(inner);
+  topY = inner.position.y + 1.6 * scale;
+
+  // drooping curtain strips — thin cones hanging from the canopy edge
+  const curtainCount = 8;
+  const curtainMat = stdMat(cols[1], { roughness: 0.85, flatShading: true, side: THREE.DoubleSide });
+  if (glow) { curtainMat.emissive = new THREE.Color(0x0a3a26); curtainMat.emissiveIntensity = 0.5; }
+  for (let c = 0; c < curtainCount; c++) {
+    const ang = (c / curtainCount) * Math.PI * 2 + Math.random() * 0.3;
+    const offR = (2.0 + Math.random() * 0.5) * scale;
+    const dropLen = (3 + Math.random() * 2.5) * scale;
+    const curtain = new THREE.Mesh(
+      geo('willowCurtain', () => new THREE.ConeGeometry(0.5, 1, 4, 1, true)),
+      curtainMat
+    );
+    curtain.scale.set(scale * 0.8, dropLen, scale * 0.8);
+    curtain.position.set(Math.cos(ang) * offR, trunkH + 0.3 * scale - dropLen * 0.3, Math.sin(ang) * offR);
+    // tilt outward slightly
+    curtain.rotation.z = Math.cos(ang) * 0.12;
+    curtain.rotation.x = Math.sin(ang) * 0.12;
+    g.add(curtain);
+  }
+  g.userData.topY = topY;
+  return g;
+}
+
+const TREE_GLB_KEYS = ['tree_pine', 'tree_birch', 'tree_maple', 'tree_oak', 'tree_autumn'];
+const TREE_BUILDERS = [makePineTree, makeOakTree, makeBirchTree, makeWillowTree];
+
+function makeTree(scale, glow) {
+  // Try GLB tree assets first, fall back to procedural builders
+  const availableGLBs = TREE_GLB_KEYS.filter(k => assetCache[k]);
+  if (availableGLBs.length > 0) {
+    const key = availableGLBs[Math.floor(Math.random() * availableGLBs.length)];
+    const glb = instantiateGLB(key);
+    if (glb) {
+      const tree = glb.root;
+      tree.scale.multiplyScalar(scale * 3.5);
+      tree.userData.topY = 10 * scale;
+      if (glow) {
+        tree.traverse(c => {
+          if (c.isMesh && c.material) {
+            if (c.material.emissive) { c.material.emissive = new THREE.Color(0x0e4732); c.material.emissiveIntensity = 0.6; }
+          }
+        });
+      }
+      return tree;
+    }
+  }
+  const builder = TREE_BUILDERS[Math.floor(Math.random() * TREE_BUILDERS.length)];
+  return builder(scale, glow);
 }
 
 function makeMushroom() {
@@ -1482,26 +1668,68 @@ function buildEnvironment() {
     }
   }
 
-  // ---- ferns (little fan clusters of blades) ----
-  if (HQ) {
-    const fernMat = stdMat(0x2f7d3e, { roughness: 0.8, flatShading: true });
-    const fernMat2 = stdMat(0x3f9a4f, { roughness: 0.8, flatShading: true });
-    const bladeGeo = geo('fernBlade', () => new THREE.ConeGeometry(0.16, 1, 4));
-    for (let i = 0; i < 22; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = R_SHORE + R_WATER * (0.02 + Math.random() * 0.85);
-      const cx = Math.cos(a) * r, cz = Math.sin(a) * r, by = terrainHeight(r) - 0.2;
-      const n = 5 + Math.floor(Math.random() * 4);
-      for (let j = 0; j < n; j++) {
-        const h = 1.6 + Math.random() * 2.2;
-        const blade = new THREE.Mesh(bladeGeo, Math.random() > 0.5 ? fernMat : fernMat2);
-        blade.scale.set(1, h, 1);
-        const spread = 0.5 + Math.random() * 0.7;
-        blade.position.set(cx + (Math.random() - 0.5) * 1.6, by + h / 2, cz + (Math.random() - 0.5) * 1.6);
-        blade.rotation.z = (Math.random() - 0.5) * spread;
-        blade.rotation.x = (Math.random() - 0.5) * spread;
-        forest.add(blade);
+  // ---- thick grass & foliage (GLB if available, procedural fallback) ----
+  // Disperse densely on the forest floor, avoiding the sandy shore zone.
+  // Sandy zone is roughly R_SHORE to R_SHORE + R_WATER*0.12 — we skip that
+  // band except for sparse beach weeds.
+  const FOLIAGE_GLB_KEYS = ['grass', 'grass_tall', 'bush', 'bush_flowers', 'flowers', 'bushes', 'flower_bushes'];
+  const availableFoliage = FOLIAGE_GLB_KEYS.filter(k => assetCache[k]);
+  const grassCount = HQ ? 220 : 50;
+  const grassMinR = R_SHORE + R_WATER * 0.14;   // past the sandy beach
+  const grassMaxR = R_WATER * 4.0;              // out to forest edge
+  for (let i = 0; i < grassCount; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = grassMinR + Math.random() * (grassMaxR - grassMinR);
+    const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
+    const by = terrainHeight(r) - 0.1;
+    if (availableFoliage.length > 0) {
+      const key = availableFoliage[Math.floor(Math.random() * availableFoliage.length)];
+      const glb = instantiateGLB(key);
+      if (glb) {
+        const s = 0.6 + Math.random() * 1.4;
+        glb.root.scale.multiplyScalar(s);
+        glb.root.position.set(cx + (Math.random() - 0.5) * 3, by, cz + (Math.random() - 0.5) * 3);
+        glb.root.rotation.y = Math.random() * 6.28;
+        forest.add(glb.root);
+        continue;
       }
+    }
+    // procedural fallback: grass blade cluster
+    const fernMat = stdMat(Math.random() > 0.5 ? 0x2f7d3e : 0x3f9a4f, { roughness: 0.8, flatShading: true });
+    const bladeGeo = geo('fernBlade', () => new THREE.ConeGeometry(0.16, 1, 4));
+    const n = 4 + Math.floor(Math.random() * 4);
+    for (let j = 0; j < n; j++) {
+      const h = 1.2 + Math.random() * 2.0;
+      const blade = new THREE.Mesh(bladeGeo, fernMat);
+      blade.scale.set(1, h, 1);
+      blade.position.set(cx + (Math.random() - 0.5) * 1.6, by + h / 2, cz + (Math.random() - 0.5) * 1.6);
+      blade.rotation.z = (Math.random() - 0.5) * 0.7;
+      blade.rotation.x = (Math.random() - 0.5) * 0.7;
+      forest.add(blade);
+    }
+  }
+
+  // ---- sparse beach weeds in the sandy zone ----
+  const beachWeedCount = HQ ? 18 : 6;
+  const beachMinR = R_SHORE + R_WATER * 0.01;
+  const beachMaxR = R_SHORE + R_WATER * 0.12;
+  for (let i = 0; i < beachWeedCount; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = beachMinR + Math.random() * (beachMaxR - beachMinR);
+    const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
+    const by = terrainHeight(r) - 0.05;
+    // sparse thin grass tufts
+    const weedMat = stdMat(0x8a9a6a, { roughness: 0.9, flatShading: true });
+    const weedGeo = geo('beachWeed', () => new THREE.ConeGeometry(0.08, 1, 3));
+    const n = 2 + Math.floor(Math.random() * 3);
+    for (let j = 0; j < n; j++) {
+      const h = 0.5 + Math.random() * 1.0;
+      const blade = new THREE.Mesh(weedGeo, weedMat);
+      blade.scale.set(1, h, 1);
+      blade.position.set(cx + (Math.random() - 0.5) * 0.8, by + h / 2, cz + (Math.random() - 0.5) * 0.8);
+      blade.rotation.z = (Math.random() - 0.5) * 0.4;
+      blade.rotation.x = (Math.random() - 0.5) * 0.4;
+      forest.add(blade);
     }
   }
 
