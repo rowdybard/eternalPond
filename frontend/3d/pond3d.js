@@ -83,7 +83,7 @@ function toWorldZ(y) { return (y - H / 2) * SCALE; }
 // ===== THREE.JS CORE =====
 const canvas = document.getElementById('pond3d');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: !LOW_QUALITY, alpha: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.5 : 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.0 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.NoToneMapping;
@@ -1449,7 +1449,7 @@ function buildTerrain(parent, HQ) {
   const deep = new THREE.Color(0x06181f), midB = new THREE.Color(0x123a44), shallow = new THREE.Color(0x2c6f72);
   const sandWet = new THREE.Color(0x4f8a8f), sandDamp = new THREE.Color(0x7ba39a); // blue watery sand
   const mossLit = new THREE.Color(0x40743f), mossDk = new THREE.Color(0x1d3a24), dirt = new THREE.Color(0x281f15);
-  const theta = HQ ? 120 : 56;
+  const theta = HQ ? 80 : 40;
 
   function colorFor(r, y, n) {
     // deep underwater: shallow teal grading down to dark deep
@@ -1495,8 +1495,8 @@ function buildTerrain(parent, HQ) {
     return new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0, flatShading: true }));
   }
 
-  parent.add(makeRing(0.4, R_SHORE, HQ ? 44 : 18));   // basin + shore
-  parent.add(makeRing(R_SHORE, G_OUT, HQ ? 30 : 12));  // forest floor
+  parent.add(makeRing(0.4, R_SHORE, HQ ? 28 : 12));   // basin + shore
+  parent.add(makeRing(R_SHORE, G_OUT, HQ ? 18 : 8));  // forest floor
 
   // soft caustic shimmer near the bowl bottom
   const caustic = new THREE.Mesh(
@@ -1742,8 +1742,8 @@ function buildEnvironment() {
   // ---- trees — 36 trees, all 5 GLB types, 1-2 sizes each ----
   const treeCount = HQ ? 36 : 12;
   const glowTreeIdx = new Set();
-  while (glowTreeIdx.size < (HQ ? 8 : 2)) glowTreeIdx.add(Math.floor(Math.random() * treeCount));
-  const faerieLights = HQ ? 5 : 0;
+  while (glowTreeIdx.size < (HQ ? 5 : 2)) glowTreeIdx.add(Math.floor(Math.random() * treeCount));
+  const faerieLights = HQ ? 3 : 0;
   let lightsPlaced = 0;
   const lightCols = [0x46e6c0, 0xbb8cff, 0x8ce0ff, 0xffd27a];
   // Assign each tree a specific GLB type + one of 2 fixed sizes for consistency
@@ -1778,7 +1778,7 @@ function buildEnvironment() {
     const m = makeMushroom();
     m.position.set(Math.cos(a) * r, terrainHeight(r) - 0.2, Math.sin(a) * r);
     forest.add(m);
-    if (HQ && i % 6 === 0) {
+    if (HQ && i % 10 === 0) {
       const gl = new THREE.PointLight(m.userData.capColor, 0.5, 22, 2);
       gl.position.set(m.position.x, m.position.y + 1.5, m.position.z);
       forest.add(gl);
@@ -1791,29 +1791,28 @@ function buildEnvironment() {
   // vertex shader wind animation — far cheaper than 3D grass GLBs.
   const grassMinR = R_SHORE + R_WATER * 0.14;   // past the sandy beach
   const grassMaxR = R_WATER * 3.5;               // out to forest edge
-  const grassCount = HQ ? 400 : 80;
+  const grassCount = HQ ? 300 : 60;
   const grassBlades = [];
 
-  // procedural grass texture (canvas → canvas texture)
+  // procedural grass texture — tall clump, visible from distance
   const grassTex = (function makeGrassTexture() {
     const c = document.createElement('canvas');
-    c.width = 64; c.height = 128;
+    c.width = 128; c.height = 256;
     const ctx = c.getContext('2d');
-    // gradient: dark base → bright tip
-    const grad = ctx.createLinearGradient(0, 128, 0, 0);
+    const grad = ctx.createLinearGradient(0, 256, 0, 0);
     grad.addColorStop(0, '#1a3a1a');
-    grad.addColorStop(0.5, '#2e6b3e');
-    grad.addColorStop(1, '#4a9a5a');
+    grad.addColorStop(0.4, '#2e6b3e');
+    grad.addColorStop(1, '#5aaa6a');
     ctx.fillStyle = grad;
-    // draw several blade shapes
-    for (let i = 0; i < 5; i++) {
-      const x = 8 + i * 12 + Math.random() * 4;
-      const w = 4 + Math.random() * 3;
-      const h = 80 + Math.random() * 40;
+    // draw tall blade clumps — thick and visible
+    for (let i = 0; i < 12; i++) {
+      const x = 10 + i * 9 + Math.random() * 5;
+      const w = 5 + Math.random() * 4;
+      const h = 180 + Math.random() * 60;
       ctx.beginPath();
-      ctx.moveTo(x - w / 2, 128);
-      ctx.quadraticCurveTo(x, 128 - h * 0.6, x, 128 - h);
-      ctx.quadraticCurveTo(x + w / 2, 128 - h * 0.4, x + w / 2, 128);
+      ctx.moveTo(x - w / 2, 256);
+      ctx.quadraticCurveTo(x + (Math.random() - 0.5) * 8, 256 - h * 0.5, x + (Math.random() - 0.5) * 6, 256 - h);
+      ctx.quadraticCurveTo(x + w / 2 + (Math.random() - 0.5) * 4, 256 - h * 0.4, x + w / 2, 256);
       ctx.fill();
     }
     const tex = new THREE.CanvasTexture(c);
@@ -1873,11 +1872,11 @@ function buildEnvironment() {
     const r = grassMinR + Math.random() * (grassMaxR - grassMinR);
     const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
     const by = terrainHeight(r) - 0.1;
-    const isBush = Math.random() < 0.15;
+    const isBush = Math.random() < 0.12;
     const mat = isBush ? bushMatBB : grassMat;
     const bb = new THREE.Mesh(bbGeo, mat);
-    const h = isBush ? 3 + Math.random() * 3 : 2.5 + Math.random() * 3;
-    const w = isBush ? h : h * 0.4;
+    const h = isBush ? 12 + Math.random() * 8 : 14 + Math.random() * 10;
+    const w = isBush ? h * 0.9 : h * 0.5;
     bb.scale.set(w, h, 1);
     bb.position.set(cx + (Math.random() - 0.5) * 3, by, cz + (Math.random() - 0.5) * 3);
     bb.userData = { baseRot: Math.random() * Math.PI, phase: Math.random() * 6.28, swayAmt: 0.05 + Math.random() * 0.08, isBush };
@@ -1996,7 +1995,7 @@ function buildCelestials() {
     const sunGlb = instantiateGLB('sun');
     if (sunGlb) {
       const sun = sunGlb.root;
-      sun.scale.multiplyScalar(300);
+      sun.scale.multiplyScalar(150);
       const sa = 2.4; // up-back direction
       sun.position.set(Math.cos(sa) * CELESTIAL_R, CELESTIAL_R * 0.5, Math.sin(sa) * CELESTIAL_R);
       scene.add(sun);
@@ -2009,7 +2008,7 @@ function buildCelestials() {
     const earthGlb = instantiateGLB('earth');
     if (earthGlb) {
       const earth = earthGlb.root;
-      earth.scale.multiplyScalar(120);
+      earth.scale.multiplyScalar(60);
       scene.add(earth);
       celestials.push({ obj: earth, type: 'earth', orbitR: CELESTIAL_R * 0.7, orbitSpeed: 0.02, orbitAngle: 0, orbitTilt: 0.3 });
     }
@@ -2020,7 +2019,7 @@ function buildCelestials() {
     const moonGlb = instantiateGLB('moon');
     if (moonGlb) {
       const moon = moonGlb.root;
-      moon.scale.multiplyScalar(40);
+      moon.scale.multiplyScalar(20);
       scene.add(moon);
       celestials.push({ obj: moon, type: 'moon', orbitR: 200, orbitSpeed: 0.15, orbitAngle: 0, parent: null });
     }
@@ -2035,7 +2034,7 @@ function buildCelestials() {
 // inside the dome through the transparent shell.
 function buildSciFiBuildings() {
   if (!assetCache.scifibuilding) return;
-  const BUILDING_SCALE = 240; // massive — visible from inside the dome
+  const BUILDING_SCALE = 120; // massive — visible from inside the dome
   const SPACING = 380; // uniform spacing between buildings
   const buildR = R_WATER * 4.5; // far outside the dome (dome = R_WATER*2.4)
 
@@ -2074,7 +2073,7 @@ function buildSciFiBuildings() {
 // energy lattice with a subtle pulse. Gives the "space terrarium" feel.
 function buildDome() {
   const DOME_R = R_WATER * 2.4;
-  const domeGeo = new THREE.IcosahedronGeometry(DOME_R, 3);
+  const domeGeo = new THREE.IcosahedronGeometry(DOME_R, 2);
   const edges = new THREE.EdgesGeometry(domeGeo);
   const domeMat = new THREE.LineBasicMaterial({
     color: 0x4fd9ff,
@@ -2137,56 +2136,63 @@ function buildPlatform() {
   edgeOut.position.y = walk.position.y + 0.06;
   scene.add(edgeOut);
 
-  // railing posts + top rail
+  // railing posts — InstancedMesh (single draw call for all posts)
   const railH = 1.8;
   const postGeo = new THREE.CylinderGeometry(0.06, 0.06, railH, 4);
   const railMat = stdMat(0x6a7a8a, { roughness: 0.4, metalness: 0.5 });
-  const postCount = 40;
+  const postCount = 24;
+  const totalPosts = postCount * 2;
+  const postMesh = new THREE.InstancedMesh(postGeo, railMat, totalPosts);
+  const _pObj = new THREE.Object3D();
+  let pi = 0;
   for (let i = 0; i < postCount; i++) {
     const a = (i / postCount) * Math.PI * 2;
-    // inner rail
-    const px = Math.cos(a) * platR, pz = Math.sin(a) * platR;
-    const post = new THREE.Mesh(postGeo, railMat);
-    post.position.set(px, walk.position.y + railH / 2, pz);
-    scene.add(post);
-    // outer rail
-    const px2 = Math.cos(a) * (platR + platW), pz2 = Math.sin(a) * (platR + platW);
-    const post2 = new THREE.Mesh(postGeo, railMat);
-    post2.position.set(px2, walk.position.y + railH / 2, pz2);
-    scene.add(post2);
+    _pObj.position.set(Math.cos(a) * platR, walk.position.y + railH / 2, Math.sin(a) * platR);
+    _pObj.updateMatrix(); postMesh.setMatrixAt(pi++, _pObj.matrix);
+    _pObj.position.set(Math.cos(a) * (platR + platW), walk.position.y + railH / 2, Math.sin(a) * (platR + platW));
+    _pObj.updateMatrix(); postMesh.setMatrixAt(pi++, _pObj.matrix);
   }
+  postMesh.instanceMatrix.needsUpdate = true;
+  scene.add(postMesh);
+
   // top rail rings (torus)
-  const railInGeo = new THREE.TorusGeometry(platR, 0.05, 6, 80);
+  const railInGeo = new THREE.TorusGeometry(platR, 0.05, 6, 64);
   railInGeo.rotateX(Math.PI / 2);
   const railIn = new THREE.Mesh(railInGeo, railMat);
   railIn.position.y = walk.position.y + railH;
   scene.add(railIn);
-  const railOutGeo = new THREE.TorusGeometry(platR + platW, 0.05, 6, 80);
+  const railOutGeo = new THREE.TorusGeometry(platR + platW, 0.05, 6, 64);
   railOutGeo.rotateX(Math.PI / 2);
   const railOut = new THREE.Mesh(railOutGeo, railMat);
   railOut.position.y = walk.position.y + railH;
   scene.add(railOut);
 
-  // support pillars down to terrain
+  // support pillars — InstancedMesh
   const pillarGeo = new THREE.CylinderGeometry(0.15, 0.2, 1, 6);
   const pillarMat = stdMat(0x2a3a4a, { roughness: 0.7, metalness: 0.3, flatShading: true });
-  const pillarCount = 16;
+  const pillarCount = 12;
+  const pillarMesh = new THREE.InstancedMesh(pillarGeo, pillarMat, pillarCount);
+  let pilI = 0;
   for (let i = 0; i < pillarCount; i++) {
     const a = (i / pillarCount) * Math.PI * 2;
     const px = Math.cos(a) * (platR + platW / 2), pz = Math.sin(a) * (platR + platW / 2);
     const gy = terrainHeight(Math.hypot(px, pz));
     const ph = walk.position.y - gy;
     if (ph > 0.5) {
-      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-      pillar.scale.y = ph;
-      pillar.position.set(px, gy + ph / 2, pz);
-      scene.add(pillar);
+      _pObj.position.set(px, gy + ph / 2, pz);
+      _pObj.scale.set(1, ph, 1);
+      _pObj.updateMatrix();
+      pillarMesh.setMatrixAt(pilI++, _pObj.matrix);
+      _pObj.scale.set(1, 1, 1);
     }
   }
+  pillarMesh.count = pilI;
+  pillarMesh.instanceMatrix.needsUpdate = true;
+  scene.add(pillarMesh);
 }
 
 function buildFireflies() {
-  const count = 70;
+  const count = 40;
   const g = new THREE.BufferGeometry();
   const positions = new Float32Array(count * 3);
   const base = [];
@@ -2883,17 +2889,15 @@ function animate() {
       }
     }
 
-    // animate billboard grass: face camera + wind sway
-    if (window.__grassBlades) {
+    // animate billboard grass: face camera + wind sway (throttled to every 3 frames)
+    if (window.__grassBlades && (frameCount % 3 === 0)) {
       const blades = window.__grassBlades;
       const camPos = camera.position;
       for (let i = 0; i < blades.length; i++) {
         const b = blades[i];
-        // face camera (billboard Y rotation only)
         const dx = camPos.x - b.position.x;
         const dz = camPos.z - b.position.z;
-        b.rotation.y = Math.atan2(dx, dz) + b.userData.baseRot * 0.3;
-        // wind sway — subtle z rotation oscillation
+        b.rotation.y = Math.atan2(dx, dz);
         if (!b.userData.isBush) {
           b.rotation.z = Math.sin(t * 1.5 + b.userData.phase) * b.userData.swayAmt;
         }
