@@ -86,11 +86,12 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: !LOW_QUALITY, alph
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.0 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
-renderer.toneMapping = THREE.NoToneMapping;
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // filmic rolloff keeps bright celestials from clipping
+renderer.toneMappingExposure = 1.2;                 // modest lift to offset ACES mid-tone compression
 
 const scene = new THREE.Scene();
 const FOG_COLOR = 0x0a0a18;
-scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0018);
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0016);
 scene.background = new THREE.Color(0x050510);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 6000);
@@ -106,7 +107,8 @@ controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.enablePan = true;
-controls.panSpeed = 0.8;
+controls.panSpeed = 1.0;
+controls.screenSpacePanning = false; // pan along the ground plane, not the screen plane
 controls.minDistance = 40;
 controls.maxDistance = 320;
 controls.minPolarAngle = 0.18;
@@ -116,71 +118,48 @@ controls.autoRotateSpeed = 0.28;
 controls.rotateSpeed = 0.65;
 if (controls.touches) controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
-// Override the built-in pan with a Y=0 plane raycast pan that works at any
-// camera angle, including nearly horizontal (where the default screen-space
-// pan breaks because the ray becomes parallel to the pan plane).
-const _panRay = new THREE.Raycaster();
-const _panMouse = new THREE.Vector2();
-const _panHit = new THREE.Vector3();
-const _panLast = new THREE.Vector3();
-const _panPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y=0 plane
-let _panActive = false;
-
-function _panNDC(clientX, clientY) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  _panMouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-  _panMouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  _panRay.setFromCamera(_panMouse, camera);
-  return _panRay.ray.intersectPlane(_panPlane, _panHit);
-}
-
-// Replace the controls' pan method — called by OrbitControls on right-drag
-controls.pan = function(deltaX, deltaY) {
-  // no-op: we handle pan manually via pointer events below
-};
-
-// Custom pan via pointer events
-renderer.domElement.addEventListener('pointerdown', (e) => {
-  if (e.button !== 2) return; // right-click only
-  if (_panNDC(e.clientX, e.clientY)) {
-    _panLast.copy(_panHit);
-    _panActive = true;
-  }
-});
-renderer.domElement.addEventListener('pointermove', (e) => {
-  if (!_panActive) return;
-  if (_panNDC(e.clientX, e.clientY)) {
-    // move target by the delta (drag the world opposite to mouse movement)
-    controls.target.x += _panLast.x - _panHit.x;
-    controls.target.z += _panLast.z - _panHit.z;
-    _panLast.copy(_panHit);
-  }
-});
-window.addEventListener('pointerup', () => { _panActive = false; });
+// Panning uses Three's built-in ground pan (controls.screenSpacePanning is
+// set false above): pixel movement is converted to world units via the
+// camera->target distance + FOV, then the target slides along the camera's
+// ground-projected right/forward axes. This is stable at every camera angle —
+// including near-horizontal — and replaces the old Y=0 plane raycast, whose
+// rays grazed the plane at shallow angles and flung the target thousands of
+// units away. The one path serves desktop right-drag and two-finger touch.
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
-// Constrain pan target to a flat circular disc inside the dome — no vertical pan,
-// and keep the camera position inside the dome sphere.
+// Constrain the pan target to a flat disc and keep the camera inside the dome.
 const PAN_RADIUS = R_WATER * 1.2;
 const DOME_R = R_WATER * 2.4;
-const _panV = new THREE.Vector3();
+const _domeR = DOME_R * 0.92;
+const _domeDir = new THREE.Vector3();
 controls.addEventListener('change', () => {
-  // lock target Y to 0 — no vertical panning
+  // lock the target to the ground and clamp it to a horizontal disc. Move the
+  // camera by the same delta so the orbit offset is preserved — holding an
+  // outward drag at the boundary feels like a clean wall, not a slow creep.
   controls.target.y = 0;
-  // clamp target to horizontal disc
   const d = Math.hypot(controls.target.x, controls.target.z);
   if (d > PAN_RADIUS) {
-    const ang = Math.atan2(controls.target.z, controls.target.x);
-    controls.target.x = Math.cos(ang) * PAN_RADIUS;
-    controls.target.z = Math.sin(ang) * PAN_RADIUS;
+    const k = PAN_RADIUS / d;
+    const dx = controls.target.x * (k - 1);
+    const dz = controls.target.z * (k - 1);
+    controls.target.x += dx;
+    controls.target.z += dz;
+    camera.position.x += dx;
+    camera.position.z += dz;
   }
-  // clamp camera position inside the dome sphere
-  const camD = Math.hypot(camera.position.x, camera.position.y, camera.position.z);
-  if (camD > DOME_R * 0.92) {
-    const s = DOME_R * 0.92 / camD;
-    camera.position.x *= s;
-    camera.position.y *= s;
-    camera.position.z *= s;
+  // If the camera leaves the dome, pull it back ALONG the camera->target line
+  // (shortens the zoom distance, preserves the view direction). The previous
+  // code scaled the position toward the world origin, which yanked the camera
+  // sideways whenever the target was panned off-centre. Solve for the point on
+  // the dome sphere along the target->camera ray: |target + t*dir|^2 = R^2.
+  _domeDir.copy(camera.position).sub(controls.target);
+  const curDist = _domeDir.length();
+  if (curDist > 1e-4) {
+    _domeDir.divideScalar(curDist); // unit dir, target -> camera
+    const b = controls.target.dot(_domeDir);
+    const c = controls.target.lengthSq() - _domeR * _domeR;
+    const tMax = -b + Math.sqrt(Math.max(0, b * b - c));
+    if (curDist > tMax) camera.position.copy(controls.target).addScaledVector(_domeDir, tMax);
   }
 });
 
@@ -866,6 +845,7 @@ class Ripple3D {
     this.radius = opts.startRadius || 0;
     this.maxRadius = opts.maxRadius || (60 + Math.random() * 40);
     this.speed = opts.speed || 1.2;
+    this.opacity = opts.opacity != null ? opts.opacity : 0.32;
     this.life = 1;
     const mat = new THREE.MeshBasicMaterial({
       color: 0xc8eeff, transparent: true, opacity: 0.3,
@@ -887,7 +867,7 @@ class Ripple3D {
   sync3D() {
     const r = Math.max(0.1, this.radius * SCALE);
     this.mesh.scale.set(r, 1, r);
-    this.mesh.material.opacity = this.life * 0.32;
+    this.mesh.material.opacity = this.life * this.opacity;
   }
   destroy() { scene.remove(this.mesh); this.mesh.material.dispose(); }
 }
@@ -897,6 +877,7 @@ class Ripple3D {
 // hunt them. Spawned in packs of ~15-20 via the plankton tool.
 let plankton = [];
 const MAX_PLANKTON = 300;
+const PLANKTON_BASELINE = 40; // client-local ambient food kept topped up
 
 class Plankton3D {
   constructor(x, y) {
@@ -908,12 +889,13 @@ class Plankton3D {
     this.decay = 0.000003 + Math.random() * 0.000002;
     this.size = 1 + Math.random() * 1.5;
     this.phase = Math.random() * Math.PI * 2;
+    this.depth = -0.4 - Math.random() * 0.4; // settle just below the surface (-0.4..-0.8)
     const col = [0x80ff80, 0x40e0d0, 0xaaff60, 0x60ffaa][Math.floor(Math.random() * 4)];
     this.mesh = new THREE.Mesh(
       geo('plankton', () => new THREE.SphereGeometry(0.15, 6, 4)),
-      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.8, fog: true })
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.55, depthWrite: false, fog: true })
     );
-    this.mesh.position.set(toWorldX(x), -1 + Math.random() * 2, toWorldZ(y));
+    this.mesh.position.set(toWorldX(x), this.depth, toWorldZ(y));
     scene.add(this.mesh);
   }
 
@@ -932,11 +914,12 @@ class Plankton3D {
   }
 
   sync3D() {
-    const bob = Math.sin(this.phase) * 0.3;
-    this.mesh.position.set(toWorldX(this.x), -1 + bob, toWorldZ(this.y));
-    const s = this.size * SCALE * 0.6;
+    const bob = Math.sin(this.phase) * 0.15;
+    this.mesh.position.set(toWorldX(this.x), this.depth + bob, toWorldZ(this.y));
+    // final world radius ~0.15-0.22 (sphere geo radius is 0.15), slight size variation
+    const s = 1.0 + (this.size - 1) * 0.31;
     this.mesh.scale.setScalar(s);
-    this.mesh.material.opacity = this.life * 0.8;
+    this.mesh.material.opacity = this.life * 0.55;
   }
 
   destroy() { scene.remove(this.mesh); }
@@ -951,6 +934,23 @@ function addPlanktonPack(x, y, silent) {
     plankton.push(new Plankton3D(px, py));
   }
   if (!silent) ripples.push(new Ripple3D(x, y, { maxRadius: 30 }));
+}
+
+// Client-local ambient food: keep a small baseline of plankton drifting near
+// where fish swim so the littlest fish always have something to eat. Not
+// broadcast (cosmetic) to avoid multiplayer plankton-count desync.
+function topUpPlankton() {
+  const count = 3 + Math.floor(Math.random() * 4); // 3-6
+  const ang = Math.random() * Math.PI * 2;
+  const rad = Math.random() * W * 0.3;             // central water region
+  const cx = W / 2 + Math.cos(ang) * rad;
+  const cy = H / 2 + Math.sin(ang) * rad;
+  for (let i = 0; i < count; i++) {
+    if (plankton.length >= MAX_PLANKTON) break;
+    const px = cx + (Math.random() - 0.5) * 40;
+    const py = cy + (Math.random() - 0.5) * 40;
+    plankton.push(new Plankton3D(px, py));
+  }
 }
 
 // ===== FISH =====
@@ -1022,6 +1022,8 @@ class Fish3D {
           this.eatTarget.life = 0;
           this.eaten++;
           this.growthScale = Math.min(this.growthScale + 0.05, 1.5);
+          // subtle feeding feedback: a faint micro-ripple where the plankton was
+          if (ripples.length < MAX_RIPPLES) ripples.push(new Ripple3D(this.eatTarget.x, this.eatTarget.y, { maxRadius: 9, speed: 0.8, opacity: 0.16 }));
           this.eatTarget = null;
           this.eatCooldown = 30;
         } else {
@@ -2145,17 +2147,54 @@ function buildCelestials() {
     });
   }
 
-  // Sun GLB — placed high, opposite the shader sun direction
+  // Soft warm corona sprite (radial gradient) — additive, always faces camera.
+  function makeSunHalo() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+    const cx = cv.getContext('2d');
+    const grd = cx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+    grd.addColorStop(0.2, 'rgba(255,255,255,0.55)');
+    grd.addColorStop(0.5, 'rgba(255,255,255,0.16)');
+    grd.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+    cx.fillStyle = grd; cx.fillRect(0, 0, 128, 128);
+    const mat = new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(cv),
+      color: 0xffcc66,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+      sizeAttenuation: true,
+    });
+    const sp = new THREE.Sprite(mat);
+    sp.scale.setScalar(720); // ~2x the sun's ~360-unit apparent disc
+    return sp;
+  }
+
+  // Sun GLB — orbits slowly through the camera's visible band (joining earth &
+  // moon) with a warm emissive disc + soft additive corona, so it reads as a
+  // glowing star arcing across its side of the sky instead of sitting off-frame.
   if (assetCache.sun) {
     const sunGlb = instantiateGLB('sun');
     if (sunGlb) {
-      const sun = sunGlb.root;
-      sun.scale.multiplyScalar(150);
-      noFog(sun);
-      const sa = 2.4;
-      sun.position.set(Math.cos(sa) * CELESTIAL_R, CELESTIAL_R * 0.5, Math.sin(sa) * CELESTIAL_R);
-      scene.add(sun);
-      celestials.push({ obj: sun, type: 'sun' });
+      const sunModel = sunGlb.root;
+      sunModel.scale.multiplyScalar(150);
+      noFog(sunModel);
+      // warm emissive so the disc glows on its own, not just from scene lights
+      sunModel.traverse(c => {
+        if (c.isMesh && c.material && c.material.emissive) {
+          c.material.emissive.set(0xffb24d);
+          c.material.emissiveIntensity = Math.max(c.material.emissiveIntensity || 0, 0.9);
+        }
+      });
+      // group holds the scaled model + a world-scaled corona that tracks it
+      const sunGroup = new THREE.Group();
+      sunGroup.add(sunModel);
+      sunGroup.add(makeSunHalo());
+      const startAngle = Math.PI; // begin opposite earth (which starts at angle 0)
+      sunGroup.position.set(Math.cos(startAngle) * 1800, 300, Math.sin(startAngle) * 1800);
+      scene.add(sunGroup);
+      celestials.push({ obj: sunGroup, type: 'sun', orbitR: 1800, orbitSpeed: 0.003, orbitAngle: startAngle, orbitTilt: 0.15, baseY: 300 });
     }
   }
 
@@ -3075,6 +3114,11 @@ function animate() {
       let earthPos = null;
       for (const c of window.__celestials) {
         if (c.type === 'sun') {
+          c.orbitAngle += c.orbitSpeed * 0.016 * dt;
+          const sx = Math.cos(c.orbitAngle) * c.orbitR;
+          const sz = Math.sin(c.orbitAngle) * c.orbitR;
+          const sy = c.baseY + Math.sin(c.orbitAngle) * c.orbitR * c.orbitTilt;
+          c.obj.position.set(sx, sy, sz);
           c.obj.rotation.y = t * 0.02;
         } else if (c.type === 'earth') {
           c.orbitAngle += c.orbitSpeed * 0.016 * dt;
@@ -3130,8 +3174,11 @@ function animate() {
     if (frameCount % 4 === 0) updateEvents();
     if (frameCount % 4 === 0) updateRedButton();
     if (frameCount % 60 === 0) maybeSpawnRandomBirds();
+    if (frameCount % 45 === 0 && plankton.length < PLANKTON_BASELINE) topUpPlankton();
 
-    updateFireflies(waterUniforms.uTime.value);
+    // fireflies drift slowly — updating every other frame is imperceptible and
+    // halves the position-buffer rewrite + GPU upload
+    if (frameCount % 2 === 0) updateFireflies(waterUniforms.uTime.value);
 
     if (cameraMode === 'follow') {
       if (myFish) updateFollowCamera();
