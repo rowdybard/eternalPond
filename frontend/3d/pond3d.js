@@ -89,28 +89,44 @@ renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.NoToneMapping;
 
 const scene = new THREE.Scene();
-const FOG_COLOR = 0x123040;
-scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0026);
-scene.background = new THREE.Color(0x0a2030);
+const FOG_COLOR = 0x0a0a18;
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0018);
+scene.background = new THREE.Color(0x050510);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 4000);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 6000);
 camera.position.set(0, 96, 142);
 camera.lookAt(0, 0, 0);
 
 // ===== ORBIT CONTROLS =====
+// Camera is locked to a circular perimeter around the pond — it can orbit,
+// zoom (clamped), and pan freely but the target is constrained to a disc
+// so you can never lose the pond.
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-controls.enablePan = false;
+controls.enablePan = true;
+controls.panSpeed = 0.8;
 controls.minDistance = 40;
-controls.maxDistance = 300;
+controls.maxDistance = 320;
 controls.minPolarAngle = 0.18;
 controls.maxPolarAngle = 1.46; // stop just above the horizon — never go underwater
 controls.autoRotate = true;
 controls.autoRotateSpeed = 0.28;
 controls.rotateSpeed = 0.65;
 if (controls.touches) controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+
+// Constrain pan target to a circular disc around the pond
+const PAN_RADIUS = R_WATER * 1.5;
+const _panV = new THREE.Vector3();
+controls.addEventListener('change', () => {
+  const d = Math.hypot(controls.target.x, controls.target.z);
+  if (d > PAN_RADIUS) {
+    const ang = Math.atan2(controls.target.z, controls.target.x);
+    controls.target.x = Math.cos(ang) * PAN_RADIUS;
+    controls.target.z = Math.sin(ang) * PAN_RADIUS;
+  }
+});
 
 // Auto-rotate resumes only after a period of no interaction.
 // NOTE: only bump on genuine user input — NOT on 'change', which fires
@@ -121,34 +137,32 @@ controls.addEventListener('start', bumpInteract);
 canvas.addEventListener('pointerdown', bumpInteract);
 canvas.addEventListener('wheel', bumpInteract, { passive: true });
 
-// ===== LIGHTING =====
-const sun = new THREE.DirectionalLight(0xfff1d6, 1.25);
+// ===== LIGHTING ===== (tuned for space dome interior)
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.1);
 sun.position.set(58, 130, 46);
 scene.add(sun);
 const sunDir = new THREE.Vector3().copy(sun.position).normalize();
 
-const hemi = new THREE.HemisphereLight(0xcfefff, 0x122c1a, 0.62);
+const hemi = new THREE.HemisphereLight(0x88aaff, 0x1a2a3a, 0.55);
 scene.add(hemi);
-const ambient = new THREE.AmbientLight(0x244f5e, 0.58);
+const ambient = new THREE.AmbientLight(0x1a3050, 0.5);
 scene.add(ambient);
 
 // faint rim/back light for separation
-const rim = new THREE.DirectionalLight(0x3fd9ff, 0.35);
+const rim = new THREE.DirectionalLight(0x4fd9ff, 0.4);
 rim.position.set(-70, 40, -90);
 scene.add(rim);
 
-// ===== SKY DOME (vertical gradient) =====
-(function buildSky() {
-  const skyGeo = new THREE.SphereGeometry(1600, 32, 18);
+// ===== SPACE SKYBOX =====
+// Deep space with stars, nebula clouds, and a distant planet.
+// Procedurally generated in the fragment shader — no textures needed.
+(function buildSpaceSky() {
+  const skyGeo = new THREE.SphereGeometry(3000, 48, 32);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     fog: false,
-    uniforms: {
-      uTop: { value: new THREE.Color(0x051321) },
-      uMid: { value: new THREE.Color(0x0e3551) },
-      uHorizon: { value: new THREE.Color(0x16597e) },
-    },
+    uniforms: { uTime: { value: 0 } },
     vertexShader: `
       varying vec3 vDir;
       void main() {
@@ -158,19 +172,64 @@ scene.add(rim);
     `,
     fragmentShader: `
       varying vec3 vDir;
-      uniform vec3 uTop; uniform vec3 uMid; uniform vec3 uHorizon;
+      uniform float uTime;
+      float hash(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+      float noise(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x),
+                       mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+                   mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+                       mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+      }
+      float fbm(vec3 p) {
+        float v = 0.0, a = 0.5;
+        for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.0; a *= 0.5; }
+        return v;
+      }
       void main() {
-        float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
-        vec3 c = mix(uHorizon, uMid, smoothstep(0.45, 0.62, h));
-        c = mix(c, uTop, smoothstep(0.6, 0.95, h));
-        // subtle warm glow near the sun side at the horizon
-        float glow = pow(clamp(dot(normalize(vDir), normalize(vec3(0.45,0.12,0.35))), 0.0, 1.0), 6.0);
-        c += vec3(0.10, 0.08, 0.04) * glow;
-        gl_FragColor = vec4(c, 1.0);
+        vec3 dir = normalize(vDir);
+        vec3 col = vec3(0.02, 0.02, 0.05);
+        // nebula clouds
+        float n1 = fbm(dir * 3.0 + vec3(uTime * 0.005, 0.0, 0.0));
+        float n2 = fbm(dir * 5.0 + vec3(0.0, uTime * 0.003, 0.0));
+        col += vec3(0.15, 0.05, 0.35) * smoothstep(0.45, 0.75, n1) * 0.6;
+        col += vec3(0.05, 0.12, 0.30) * smoothstep(0.5, 0.8, n2) * 0.5;
+        // distant planet
+        vec3 planetPos = normalize(vec3(0.6, 0.3, -0.8));
+        float pd = dot(dir, planetPos);
+        if (pd > 0.92) {
+          float pp = (pd - 0.92) / 0.08;
+          vec3 pcol = mix(vec3(0.3, 0.15, 0.1), vec3(0.5, 0.3, 0.15), pp);
+          pcol += vec3(0.2, 0.1, 0.05) * smoothstep(0.5, 1.0, pp);
+          col = mix(col, pcol, smoothstep(0.0, 0.3, pp) * (1.0 - smoothstep(0.7, 1.0, pp) * 0.5));
+        }
+        // star field — multi-layer
+        for (int layer = 0; layer < 3; layer++) {
+          float scale = 80.0 + float(layer) * 60.0;
+          vec3 sp = dir * scale;
+          vec3 si = floor(sp);
+          float h = hash(si);
+          if (h > 0.985) {
+            vec3 sf = fract(sp);
+            float d = length(sf - 0.5);
+            float bright = (1.0 - smoothstep(0.0, 0.15, d)) * (h - 0.985) / 0.015;
+            float tw = 0.7 + 0.3 * sin(uTime * 2.0 + h * 100.0);
+            vec3 starCol = mix(vec3(1.0, 0.95, 0.8), vec3(0.7, 0.8, 1.0), h);
+            col += starCol * bright * tw;
+          }
+        }
+        gl_FragColor = vec4(col, 1.0);
       }
     `,
   });
-  scene.add(new THREE.Mesh(skyGeo, skyMat));
+  const sky = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(sky);
+  window.__skyShader = skyMat;
 })();
 
 // ===== WATER SURFACE =====
@@ -1668,46 +1727,108 @@ function buildEnvironment() {
     }
   }
 
-  // ---- thick grass & foliage (GLB if available, procedural fallback) ----
+  // ---- 2D billboard grass & foliage (animated wind sway, much lighter) ----
   // Disperse densely on the forest floor, avoiding the sandy shore zone.
-  // Sandy zone is roughly R_SHORE to R_SHORE + R_WATER*0.12 — we skip that
-  // band except for sparse beach weeds.
-  const FOLIAGE_GLB_KEYS = ['grass', 'grass_tall', 'bush', 'bush_flowers', 'flowers', 'bushes', 'flower_bushes'];
-  const availableFoliage = FOLIAGE_GLB_KEYS.filter(k => assetCache[k]);
-  const grassCount = HQ ? 220 : 50;
+  // Uses camera-facing billboards with a procedural grass texture and
+  // vertex shader wind animation — far cheaper than 3D grass GLBs.
   const grassMinR = R_SHORE + R_WATER * 0.14;   // past the sandy beach
-  const grassMaxR = R_WATER * 4.0;              // out to forest edge
+  const grassMaxR = R_WATER * 3.5;               // out to forest edge
+  const grassCount = HQ ? 400 : 80;
+  const grassBlades = [];
+
+  // procedural grass texture (canvas → canvas texture)
+  const grassTex = (function makeGrassTexture() {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 128;
+    const ctx = c.getContext('2d');
+    // gradient: dark base → bright tip
+    const grad = ctx.createLinearGradient(0, 128, 0, 0);
+    grad.addColorStop(0, '#1a3a1a');
+    grad.addColorStop(0.5, '#2e6b3e');
+    grad.addColorStop(1, '#4a9a5a');
+    ctx.fillStyle = grad;
+    // draw several blade shapes
+    for (let i = 0; i < 5; i++) {
+      const x = 8 + i * 12 + Math.random() * 4;
+      const w = 4 + Math.random() * 3;
+      const h = 80 + Math.random() * 40;
+      ctx.beginPath();
+      ctx.moveTo(x - w / 2, 128);
+      ctx.quadraticCurveTo(x, 128 - h * 0.6, x, 128 - h);
+      ctx.quadraticCurveTo(x + w / 2, 128 - h * 0.4, x + w / 2, 128);
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    return tex;
+  })();
+
+  // bush/flower billboard texture
+  const bushTex = (function makeBushTexture() {
+    const c = document.createElement('canvas');
+    c.width = 128; c.height = 128;
+    const ctx = c.getContext('2d');
+    // green bush blob with some flowers
+    ctx.fillStyle = '#2a5a3a';
+    ctx.beginPath();
+    ctx.arc(64, 70, 45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#3a7a4a';
+    ctx.beginPath();
+    ctx.arc(50, 60, 25, 0, Math.PI * 2);
+    ctx.arc(80, 55, 22, 0, Math.PI * 2);
+    ctx.fill();
+    // scattered flowers
+    const fcols = ['#ff6b9a', '#ffd27a', '#a07aff'];
+    for (let i = 0; i < 8; i++) {
+      ctx.fillStyle = fcols[i % 3];
+      ctx.beginPath();
+      ctx.arc(35 + Math.random() * 60, 40 + Math.random() * 40, 3 + Math.random() * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    return tex;
+  })();
+
+  const grassMat = new THREE.MeshBasicMaterial({
+    map: grassTex,
+    transparent: true,
+    alphaTest: 0.3,
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+  const bushMatBB = new THREE.MeshBasicMaterial({
+    map: bushTex,
+    transparent: true,
+    alphaTest: 0.2,
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+
+  // shared billboard geometry — a plane that we'll position and scale per instance
+  const bbGeo = new THREE.PlaneGeometry(1, 1);
+  bbGeo.translate(0, 0.5, 0); // anchor at bottom
+
   for (let i = 0; i < grassCount; i++) {
     const a = Math.random() * Math.PI * 2;
     const r = grassMinR + Math.random() * (grassMaxR - grassMinR);
     const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
     const by = terrainHeight(r) - 0.1;
-    if (availableFoliage.length > 0) {
-      const key = availableFoliage[Math.floor(Math.random() * availableFoliage.length)];
-      const glb = instantiateGLB(key);
-      if (glb) {
-        const s = 0.6 + Math.random() * 1.4;
-        glb.root.scale.multiplyScalar(s);
-        glb.root.position.set(cx + (Math.random() - 0.5) * 3, by, cz + (Math.random() - 0.5) * 3);
-        glb.root.rotation.y = Math.random() * 6.28;
-        forest.add(glb.root);
-        continue;
-      }
-    }
-    // procedural fallback: grass blade cluster
-    const fernMat = stdMat(Math.random() > 0.5 ? 0x2f7d3e : 0x3f9a4f, { roughness: 0.8, flatShading: true });
-    const bladeGeo = geo('fernBlade', () => new THREE.ConeGeometry(0.16, 1, 4));
-    const n = 4 + Math.floor(Math.random() * 4);
-    for (let j = 0; j < n; j++) {
-      const h = 1.2 + Math.random() * 2.0;
-      const blade = new THREE.Mesh(bladeGeo, fernMat);
-      blade.scale.set(1, h, 1);
-      blade.position.set(cx + (Math.random() - 0.5) * 1.6, by + h / 2, cz + (Math.random() - 0.5) * 1.6);
-      blade.rotation.z = (Math.random() - 0.5) * 0.7;
-      blade.rotation.x = (Math.random() - 0.5) * 0.7;
-      forest.add(blade);
-    }
+    const isBush = Math.random() < 0.15;
+    const mat = isBush ? bushMatBB : grassMat;
+    const bb = new THREE.Mesh(bbGeo, mat);
+    const h = isBush ? 3 + Math.random() * 3 : 2.5 + Math.random() * 3;
+    const w = isBush ? h : h * 0.4;
+    bb.scale.set(w, h, 1);
+    bb.position.set(cx + (Math.random() - 0.5) * 3, by, cz + (Math.random() - 0.5) * 3);
+    bb.userData = { baseRot: Math.random() * Math.PI, phase: Math.random() * 6.28, swayAmt: 0.05 + Math.random() * 0.08, isBush };
+    grassBlades.push(bb);
+    forest.add(bb);
   }
+
+  // store for wind animation
+  window.__grassBlades = grassBlades;
 
   // ---- sparse beach weeds in the sandy zone ----
   const beachWeedCount = HQ ? 18 : 6;
@@ -1788,8 +1909,130 @@ function buildEnvironment() {
 
   scene.add(forest);
 
+  // ---- energy dome (transparent geodesic shell over the pond) ----
+  buildDome();
+
+  // ---- observation platform ring (tourist walkway at terrain edge) ----
+  buildPlatform();
+
   // ---- fireflies drifting over the water ----
   if (HQ) buildFireflies();
+}
+
+// ===== ENERGY DOME =====
+// A transparent geodesic dome that encloses the pond — visible as a faint
+// energy lattice with a subtle pulse. Gives the "space terrarium" feel.
+function buildDome() {
+  const DOME_R = R_WATER * 2.4;
+  const domeGeo = new THREE.IcosahedronGeometry(DOME_R, 3);
+  const edges = new THREE.EdgesGeometry(domeGeo);
+  const domeMat = new THREE.LineBasicMaterial({
+    color: 0x4fd9ff,
+    transparent: true,
+    opacity: 0.12,
+    fog: false,
+  });
+  const dome = new THREE.LineSegments(edges, domeMat);
+  dome.position.y = 0;
+  scene.add(dome);
+
+  // inner translucent shell — very faint, just enough to catch light
+  const shellMat = new THREE.MeshBasicMaterial({
+    color: 0x1a4a6a,
+    transparent: true,
+    opacity: 0.04,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    fog: false,
+  });
+  const shell = new THREE.Mesh(domeGeo, shellMat);
+  scene.add(shell);
+
+  // glowing equator ring
+  const ringGeo = new THREE.TorusGeometry(DOME_R, 0.3, 8, 80);
+  ringGeo.rotateX(Math.PI / 2);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x4fd9ff, transparent: true, opacity: 0.3, fog: false });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  scene.add(ring);
+
+  // store for animation
+  window.__dome = { mat: domeMat, shellMat, ringMat };
+}
+
+// ===== OBSERVATION PLATFORM =====
+// A circular walkway at the terrain edge with railing — like a tourist
+// viewing deck overlooking the pond from inside the dome.
+function buildPlatform() {
+  const platR = R_WATER * 1.06;
+  const platW = 6;
+
+  // walkway surface
+  const walkGeo = new THREE.RingGeometry(platR, platR + platW, 80, 2);
+  walkGeo.rotateX(-Math.PI / 2);
+  const walkMat = stdMat(0x3a4a5a, { roughness: 0.6, metalness: 0.3, flatShading: true });
+  const walk = new THREE.Mesh(walkGeo, walkMat);
+  walk.position.y = terrainHeight(platR) + 0.5;
+  scene.add(walk);
+
+  // glowing edge strips
+  const edgeInGeo = new THREE.RingGeometry(platR - 0.2, platR + 0.2, 80, 1);
+  edgeInGeo.rotateX(-Math.PI / 2);
+  const edgeOutGeo = new THREE.RingGeometry(platR + platW - 0.2, platR + platW + 0.2, 80, 1);
+  edgeOutGeo.rotateX(-Math.PI / 2);
+  const edgeMat = new THREE.MeshBasicMaterial({ color: 0x4fd9ff, transparent: true, opacity: 0.5, fog: false });
+  const edgeIn = new THREE.Mesh(edgeInGeo, edgeMat);
+  edgeIn.position.y = walk.position.y + 0.06;
+  scene.add(edgeIn);
+  const edgeOut = new THREE.Mesh(edgeOutGeo, edgeMat);
+  edgeOut.position.y = walk.position.y + 0.06;
+  scene.add(edgeOut);
+
+  // railing posts + top rail
+  const railH = 1.8;
+  const postGeo = new THREE.CylinderGeometry(0.06, 0.06, railH, 4);
+  const railMat = stdMat(0x6a7a8a, { roughness: 0.4, metalness: 0.5 });
+  const postCount = 40;
+  for (let i = 0; i < postCount; i++) {
+    const a = (i / postCount) * Math.PI * 2;
+    // inner rail
+    const px = Math.cos(a) * platR, pz = Math.sin(a) * platR;
+    const post = new THREE.Mesh(postGeo, railMat);
+    post.position.set(px, walk.position.y + railH / 2, pz);
+    scene.add(post);
+    // outer rail
+    const px2 = Math.cos(a) * (platR + platW), pz2 = Math.sin(a) * (platR + platW);
+    const post2 = new THREE.Mesh(postGeo, railMat);
+    post2.position.set(px2, walk.position.y + railH / 2, pz2);
+    scene.add(post2);
+  }
+  // top rail rings (torus)
+  const railInGeo = new THREE.TorusGeometry(platR, 0.05, 6, 80);
+  railInGeo.rotateX(Math.PI / 2);
+  const railIn = new THREE.Mesh(railInGeo, railMat);
+  railIn.position.y = walk.position.y + railH;
+  scene.add(railIn);
+  const railOutGeo = new THREE.TorusGeometry(platR + platW, 0.05, 6, 80);
+  railOutGeo.rotateX(Math.PI / 2);
+  const railOut = new THREE.Mesh(railOutGeo, railMat);
+  railOut.position.y = walk.position.y + railH;
+  scene.add(railOut);
+
+  // support pillars down to terrain
+  const pillarGeo = new THREE.CylinderGeometry(0.15, 0.2, 1, 6);
+  const pillarMat = stdMat(0x2a3a4a, { roughness: 0.7, metalness: 0.3, flatShading: true });
+  const pillarCount = 16;
+  for (let i = 0; i < pillarCount; i++) {
+    const a = (i / pillarCount) * Math.PI * 2;
+    const px = Math.cos(a) * (platR + platW / 2), pz = Math.sin(a) * (platR + platW / 2);
+    const gy = terrainHeight(Math.hypot(px, pz));
+    const ph = walk.position.y - gy;
+    if (ph > 0.5) {
+      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+      pillar.scale.y = ph;
+      pillar.position.set(px, gy + ph / 2, pz);
+      scene.add(pillar);
+    }
+  }
 }
 
 function buildFireflies() {
@@ -2447,7 +2690,35 @@ function animate() {
     lastTime = now;
     frameCount++;
 
-    waterUniforms.uTime.value += 0.016 * dt;
+    const t = waterUniforms.uTime.value += 0.016 * dt;
+
+    // animate space skybox
+    if (window.__skyShader) window.__skyShader.uniforms.uTime.value = t;
+
+    // animate dome pulse
+    if (window.__dome) {
+      const p = 0.10 + 0.04 * Math.sin(t * 0.8);
+      window.__dome.mat.opacity = p;
+      window.__dome.shellMat.opacity = 0.03 + 0.02 * Math.sin(t * 0.6);
+      window.__dome.ringMat.opacity = 0.25 + 0.08 * Math.sin(t * 1.2);
+    }
+
+    // animate billboard grass: face camera + wind sway
+    if (window.__grassBlades) {
+      const blades = window.__grassBlades;
+      const camPos = camera.position;
+      for (let i = 0; i < blades.length; i++) {
+        const b = blades[i];
+        // face camera (billboard Y rotation only)
+        const dx = camPos.x - b.position.x;
+        const dz = camPos.z - b.position.z;
+        b.rotation.y = Math.atan2(dx, dz) + b.userData.baseRot * 0.3;
+        // wind sway — subtle z rotation oscillation
+        if (!b.userData.isBush) {
+          b.rotation.z = Math.sin(t * 1.5 + b.userData.phase) * b.userData.swayAmt;
+        }
+      }
+    }
 
     lilies = lilies.filter(l => { const a = l.update(); if (a) l.sync3D(); else l.destroy(); return a; });
     ripples = ripples.filter(r => { const a = r.update(); if (a) r.sync3D(); else r.destroy(); return a; });
