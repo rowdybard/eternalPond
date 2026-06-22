@@ -37,6 +37,16 @@ const POND_WORLD = W * SCALE;  // 120 world units across
 const HALF = POND_WORLD / 2;   // 60
 const R_WATER = HALF * 2.19;   // ~131 — pond water disc radius (tucks under the bank)
 
+// ===== SPAWN / PLAY-AREA MAPPING =====
+// Positions are mapped game->world by POS_SCALE, which is DECOUPLED from SCALE
+// (SCALE still governs creature/effect SIZES). POS_SCALE makes the logical game
+// disc fill the pond so creatures spawn & roam across ~95% of the water instead
+// of clustering in the central ~65%. The pond, terrain, forest, dome, buildings
+// and celestials are all built in world units and are completely unaffected.
+const POS_SCALE = R_WATER / (W / 2);   // game radius 500 -> R_WATER  (~0.263)
+const FILL_R_WORLD = R_WATER * 0.95;   // outermost fillable radius (surface things)
+const PLAY_CX = W / 2, PLAY_CY = H / 2;
+
 // ===== TERRAIN PROFILE =====
 // One continuous bowl: a deep ~flat play basin, a smooth shore that rises
 // through the waterline (y=0), then a forest-floor plateau. The water disc
@@ -60,6 +70,40 @@ function terrainHeight(r) {
   return BANK_RISE * (t * t * (3 - 2 * t));       // 0 .. +7.5 (land rising out)
 }
 
+// ===== POND-DISC HELPERS =====
+// game-space distance from the pond centre
+function gameRadius(x, y) { return Math.hypot(x - PLAY_CX, y - PLAY_CY); }
+
+// Clamp a game point to within `maxWorldR` (world units) of the pond centre.
+// Returns a {x,y} game point that maps inside the water disc.
+function clampToPond(x, y, maxWorldR) {
+  const maxGameR = (maxWorldR != null ? maxWorldR : FILL_R_WORLD) / POS_SCALE;
+  const r = Math.hypot(x - PLAY_CX, y - PLAY_CY);
+  if (r <= maxGameR || r < 1e-6) return { x, y };
+  const k = maxGameR / r;
+  return { x: PLAY_CX + (x - PLAY_CX) * k, y: PLAY_CY + (y - PLAY_CY) * k };
+}
+
+// Uniform-by-area random game point within the fillable pond disc.
+function randomPondPoint(maxWorldR) {
+  const maxGameR = (maxWorldR != null ? maxWorldR : FILL_R_WORLD) / POS_SCALE;
+  const a = Math.random() * Math.PI * 2;
+  const r = Math.sqrt(Math.random()) * maxGameR;
+  return { x: PLAY_CX + Math.cos(a) * r, y: PLAY_CY + Math.sin(a) * r };
+}
+
+// Largest WORLD radius where the pond bottom stays at least `clearance` below a
+// swimmer at world-Y `swimDepthY`, so it never clips the rising shore. The bowl
+// bottom is monotonic past R_PLAY, so a short binary search inverts it.
+function maxSwimWorldR(swimDepthY, clearance) {
+  const target = swimDepthY - clearance;           // terrainHeight(r) must be <= target
+  if (terrainHeight(FILL_R_WORLD) <= target) return FILL_R_WORLD;
+  if (terrainHeight(0) > target) return R_PLAY * 0.5; // degenerate guard
+  let lo = 0, hi = FILL_R_WORLD;
+  for (let i = 0; i < 22; i++) { const mid = (lo + hi) * 0.5; if (terrainHeight(mid) <= target) lo = mid; else hi = mid; }
+  return lo;
+}
+
 // Interactive water ripple buffer size (fed to the water shader)
 const MAX_WATER_RIPPLES = LOW_QUALITY ? 6 : 14;
 
@@ -77,8 +121,8 @@ function denormY(y) { return y * H; }
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
 // game (x,y) + world height -> THREE world position
-function toWorldX(x) { return (x - W / 2) * SCALE; }
-function toWorldZ(y) { return (y - H / 2) * SCALE; }
+function toWorldX(x) { return (x - W / 2) * POS_SCALE; }
+function toWorldZ(y) { return (y - H / 2) * POS_SCALE; }
 
 // ===== THREE.JS CORE =====
 const canvas = document.getElementById('pond3d');
@@ -830,7 +874,7 @@ class Wave3D {
   }
 
   sync3D() {
-    const r = Math.max(0.1, this.radius * SCALE);
+    const r = Math.max(0.1, this.radius * POS_SCALE);
     this.mesh.scale.set(r, 1, r);
     this.mesh.material.opacity = this.life * 0.7;
   }
@@ -865,7 +909,7 @@ class Ripple3D {
     return this.life > 0;
   }
   sync3D() {
-    const r = Math.max(0.1, this.radius * SCALE);
+    const r = Math.max(0.1, this.radius * POS_SCALE);
     this.mesh.scale.set(r, 1, r);
     this.mesh.material.opacity = this.life * this.opacity;
   }
@@ -941,10 +985,8 @@ function addPlanktonPack(x, y, silent) {
 // broadcast (cosmetic) to avoid multiplayer plankton-count desync.
 function topUpPlankton() {
   const count = 3 + Math.floor(Math.random() * 4); // 3-6
-  const ang = Math.random() * Math.PI * 2;
-  const rad = Math.random() * W * 0.3;             // central water region
-  const cx = W / 2 + Math.cos(ang) * rad;
-  const cy = H / 2 + Math.sin(ang) * rad;
+  const c = randomPondPoint(R_WATER * 0.82);       // spread food across the water, not just the centre
+  const cx = c.x, cy = c.y;
   for (let i = 0; i < count; i++) {
     if (plankton.length >= MAX_PLANKTON) break;
     const px = cx + (Math.random() - 0.5) * 40;
@@ -975,6 +1017,15 @@ class Fish3D {
     this.name = '';
     this.bob = Math.random() * Math.PI * 2;
     this.invuln = 0; // invulnerability timer in frames (90s ~ 5400 frames at 60fps)
+
+    // depth-aware roaming/spawn limit so swimmers never clip the rising shore:
+    // bigger/deeper fish keep to deeper water, small fish range nearly to the rim.
+    const _swimY = -(1.5 + this.tier * 1.25) - 0.35;   // deepest point of the bob
+    this.swimClear = 0.5 + this.tier * 0.35;           // vertical clearance (grows with tier)
+    const _maxWorldR = maxSwimWorldR(_swimY, this.swimClear);
+    this.maxGameR = _maxWorldR / POS_SCALE;
+    const _sp = clampToPond(this.x, this.y, _maxWorldR); // pull edge/event/remote spawns into fittable water
+    this.x = _sp.x; this.y = _sp.y;
 
     const isLegendary = this.tier === 3;
     const glb = isLegendary && assetCache.penguin ? instantiateGLB('penguin') :
@@ -1077,11 +1128,20 @@ class Fish3D {
     }
     this.angle += this.turnRate;
 
-    const margin = 60;
-    if (this.x < margin && this.vx > -0.5) this.angle += 0.03;
-    if (this.x > W - margin && this.vx < 0.5) this.angle -= 0.03;
-    if (this.y < margin && this.vy > -0.5) this.angle += 0.03;
-    if (this.y > H - margin && this.vy < 0.5) this.angle -= 0.03;
+    // radial soft-bound: ease back toward centre near the depth-aware limit so
+    // fish fill the pond evenly instead of stacking in the middle or clipping out.
+    const _rg = Math.hypot(this.x - PLAY_CX, this.y - PLAY_CY);
+    if (_rg > this.maxGameR * 0.9) {
+      const _inward = Math.atan2(PLAY_CY - this.y, PLAY_CX - this.x);
+      let _d = ((_inward - this.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      const _push = clamp((_rg - this.maxGameR * 0.9) / (this.maxGameR * 0.1), 0, 1);
+      this.angle += clamp(_d, -0.06, 0.06) * _push;
+      if (_rg > this.maxGameR) {                       // hard stop at the water's safe edge
+        const _k = this.maxGameR / _rg;
+        this.x = PLAY_CX + (this.x - PLAY_CX) * _k;
+        this.y = PLAY_CY + (this.y - PLAY_CY) * _k;
+      }
+    }
 
     this.x += Math.cos(this.angle) * this.speed + this.vx;
     this.y += Math.sin(this.angle) * this.speed + this.vy;
@@ -1097,8 +1157,12 @@ class Fish3D {
   }
 
   sync3D(dt) {
-    const depth = -(1.5 + this.tier * 1.25) + Math.sin(this.bob) * 0.35;
-    this.mesh.position.set(toWorldX(this.x), depth, toWorldZ(this.y));
+    let depth = -(1.5 + this.tier * 1.25) + Math.sin(this.bob) * 0.35;
+    const wx = toWorldX(this.x), wz = toWorldZ(this.y);
+    // anti-clip safety net: stay above the local pond bottom, never breach the surface
+    depth = Math.max(depth, terrainHeight(Math.hypot(wx, wz)) + this.swimClear);
+    depth = Math.min(depth, -0.3);
+    this.mesh.position.set(wx, depth, wz);
     this.mesh.rotation.y = -this.angle;
     this.mesh.rotation.z = Math.sin(this.tailPhase) * 0.08; // body roll
     const s = this.size * this.growthScale * SCALE * VISUAL;
@@ -1223,7 +1287,8 @@ class Frog3D {
       const distHop = 80 + Math.random() * 120;
       const ang = Math.random() * Math.PI * 2;
       this.hopFrom = { x: this.x, y: this.y };
-      this.hopTo = { x: clamp(this.x + Math.cos(ang) * distHop, 40, W - 40), y: clamp(this.y + Math.sin(ang) * distHop, 40, H - 40) };
+      const _ht = clampToPond(this.x + Math.cos(ang) * distHop, this.y + Math.sin(ang) * distHop, R_WATER * 0.9);
+      this.hopTo = { x: _ht.x, y: _ht.y };
       this.faceAngle = Math.atan2(this.hopTo.y - this.hopFrom.y, this.hopTo.x - this.hopFrom.x);
       this.state = 'hopping'; this.hopProgress = 0; this.onLily = null;
       ripples.push(new Ripple3D(this.x, this.y, { maxRadius: 50 }));
@@ -1332,11 +1397,15 @@ class Dragonfly3D {
     this.y += Math.sin(this.angle) * this.speed + this.vy;
     this.vx *= 0.95; this.vy *= 0.95;
 
-    const margin = 30;
-    if (this.x < margin) { this.x = margin; this.angle = Math.PI - this.angle; }
-    if (this.x > W - margin) { this.x = W - margin; this.angle = Math.PI - this.angle; }
-    if (this.y < margin) { this.y = margin; this.angle = -this.angle; }
-    if (this.y > H - margin) { this.y = H - margin; this.angle = -this.angle; }
+    // keep dragonflies hovering over the pond (radial bound)
+    const _maxR = FILL_R_WORLD / POS_SCALE;
+    const _rg = Math.hypot(this.x - PLAY_CX, this.y - PLAY_CY);
+    if (_rg > _maxR) {
+      const _k = _maxR / _rg;
+      this.x = PLAY_CX + (this.x - PLAY_CX) * _k;
+      this.y = PLAY_CY + (this.y - PLAY_CY) * _k;
+      this.angle = Math.atan2(PLAY_CY - this.y, PLAY_CX - this.x);
+    }
 
     this.life -= this.decay;
     if (isOffScreen(this.x, this.y)) return false;
@@ -1545,6 +1614,7 @@ function addRipple(x, y, opts) {
 }
 
 function addCreature(type, x, y, extra, silent) {
+  const _p = clampToPond(x, y); x = _p.x; y = _p.y; // keep every spawn inside the water disc
   if (creatures.length >= MAX_CREATURES) creatures.shift().destroy();
   let c;
   switch (type) {
@@ -1568,6 +1638,7 @@ function addCreature(type, x, y, extra, silent) {
 
 let lastLilyPlace = { x: -999, y: -999, time: 0 };
 function addLily(x, y, silent) {
+  const _p = clampToPond(x, y); x = _p.x; y = _p.y;
   const now = Date.now();
   if (!silent) {
     if (dist(x, y, lastLilyPlace.x, lastLilyPlace.y) < 40 && now - lastLilyPlace.time < LILY_PLACE_COOLDOWN) return false;
@@ -2453,7 +2524,10 @@ function screenToGame(clientX, clientY) {
   raycaster.setFromCamera(ndc, camera);
   const hit = new THREE.Vector3();
   if (!raycaster.ray.intersectPlane(waterPlane, hit)) return null;
-  return { x: clamp(hit.x / SCALE + W / 2, 0, W), y: clamp(hit.z / SCALE + H / 2, 0, H) };
+  // invert the POS_SCALE position mapping, then clamp to the fillable pond disc
+  // so clicking on (or past) the outer water spawns right at the rim, not snapped
+  // back to a central square.
+  return clampToPond(hit.x / POS_SCALE + W / 2, hit.z / POS_SCALE + H / 2);
 }
 
 let pDownX = 0, pDownY = 0, pDownT = 0, pMoved = false;
@@ -2563,10 +2637,10 @@ const EVENT_DURATION = 10;
 let nextEventTime = Date.now() + 30000 + Math.random() * 30000;
 
 const EVENT_TYPES = [
-  { id: 'catch_flies', text: 'A swarm of flies appears!', spawn: () => { for (let i = 0; i < 8; i++) addCreature('dragonfly', Math.random() * W, Math.random() * H); } },
-  { id: 'big_fish', text: 'A legendary fish surfaces...', legendary: true, spawn: () => { addCreature('fish', Math.random() * W, Math.random() * H, { tier: 3 }); } },
-  { id: 'frog_party', text: 'Frogs are gathering!', spawn: () => { for (let i = 0; i < 4; i++) addCreature('frog', Math.random() * W, Math.random() * H); } },
-  { id: 'lily_bloom', text: 'Lily pads are blooming!', spawn: () => { for (let i = 0; i < 5; i++) addLily(Math.random() * W, Math.random() * H); } },
+  { id: 'catch_flies', text: 'A swarm of flies appears!', spawn: () => { for (let i = 0; i < 8; i++) { const p = randomPondPoint(R_WATER * 0.9); addCreature('dragonfly', p.x, p.y); } } },
+  { id: 'big_fish', text: 'A legendary fish surfaces...', legendary: true, spawn: () => { const p = randomPondPoint(R_WATER * 0.6); addCreature('fish', p.x, p.y, { tier: 3 }); } },
+  { id: 'frog_party', text: 'Frogs are gathering!', spawn: () => { for (let i = 0; i < 4; i++) { const p = randomPondPoint(R_WATER * 0.85); addCreature('frog', p.x, p.y); } } },
+  { id: 'lily_bloom', text: 'Lily pads are blooming!', spawn: () => { for (let i = 0; i < 5; i++) { const p = randomPondPoint(R_WATER * 0.88); addLily(p.x, p.y); } } },
   { id: 'bird_strike', text: 'BIRDS INCOMING — frogs and fish beware!', spawn: () => { spawnBirdBarrage(); } },
 ];
 
@@ -2824,14 +2898,13 @@ function updateFishLivesDisplay() {
 }
 
 function spawnPlayerFish() {
-  const x = W * 0.5 + (Math.random() - 0.5) * 100;
-  const y = H * 0.5 + (Math.random() - 0.5) * 100;
-  const fish = new Fish3D(x, y, undefined, true);
+  const _p = randomPondPoint(R_WATER * 0.75); // spread the player across the pond, not dead-centre
+  const fish = new Fish3D(_p.x, _p.y, undefined, true);
   fish.setPlayer(myUserName || 'you');
   creatures.push(fish);
   myFish = fish; isDead = false;
   respawnBanner.classList.remove('visible');
-  ripples.push(new Ripple3D(x, y, { maxRadius: 50 }));
+  ripples.push(new Ripple3D(fish.x, fish.y, { maxRadius: 50 })); // fish.x/y are post-clamp
   reportFishLife();
 }
 
@@ -3197,18 +3270,12 @@ function animate() {
 // ===================================================================
 function seedInitialLife() {
   if (creatures.length === 0 && lilies.length === 0) {
-    addLily(W * 0.25, H * 0.65, true);
-    addLily(W * 0.72, H * 0.38, true);
-    addLily(W * 0.5, H * 0.75, true);
-    addCreature('fish', W * 0.5, H * 0.5, undefined, true);
-    addCreature('fish', W * 0.4, H * 0.6, undefined, true);
-    addCreature('fish', W * 0.65, H * 0.55, undefined, true);
-    addCreature('fish', W * 0.3, H * 0.4, { tier: 1 }, true);
-    addCreature('dragonfly', W * 0.6, H * 0.3, undefined, true);
-    addCreature('dragonfly', W * 0.7, H * 0.25, undefined, true);
-    addCreature('frog', W * 0.3, H * 0.7, undefined, true);
-    addPlanktonPack(W * 0.5, H * 0.5, true);
-    addPlanktonPack(W * 0.35, H * 0.45, true);
+    for (let i = 0; i < 3; i++) { const p = randomPondPoint(R_WATER * 0.85); addLily(p.x, p.y, true); }
+    for (let i = 0; i < 3; i++) { const p = randomPondPoint(R_WATER * 0.85); addCreature('fish', p.x, p.y, undefined, true); }
+    { const p = randomPondPoint(R_WATER * 0.7); addCreature('fish', p.x, p.y, { tier: 1 }, true); }
+    for (let i = 0; i < 2; i++) { const p = randomPondPoint(R_WATER * 0.9); addCreature('dragonfly', p.x, p.y, undefined, true); }
+    { const p = randomPondPoint(R_WATER * 0.85); addCreature('frog', p.x, p.y, undefined, true); }
+    for (let i = 0; i < 2; i++) { const p = randomPondPoint(R_WATER * 0.7); addPlanktonPack(p.x, p.y, true); }
   }
   // offline/solo: give the player their own fish to ride (online players
   // receive theirs from the server snapshot instead)
