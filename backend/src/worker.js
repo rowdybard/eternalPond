@@ -36,15 +36,15 @@ export class PondRoom {
     ws.accept();
     const userId = ++this.userIdCounter;
     const userName = this.generateName();
-    const user = { id: userId, name: userName, counts: { wave: 0, fish: 0, frog: 0, dragonfly: 0, lily: 0 } };
+    const user = { id: userId, name: userName, counts: { wave: 0, fish: 0, frog: 0, dragonfly: 0, lily: 0 }, lastActionTimes: [] };
     this.sessions.set(ws, user);
 
     // send current state snapshot + user list
     ws.send(JSON.stringify({
       type: 'snapshot',
       state: {
-        creatures: this.creatures.slice(-30),
-        lilies: this.lilies.slice(-20),
+        creatures: this.creatures,
+        lilies: this.lilies,
       },
       you: { id: userId, name: userName },
       users: this.getUserList(),
@@ -56,6 +56,7 @@ export class PondRoom {
 
     ws.addEventListener('message', (event) => {
       try {
+        if (event.data.length > 1024) return;
         const action = JSON.parse(event.data);
         this.handleAction(action, ws);
       } catch (e) {}
@@ -89,6 +90,13 @@ export class PondRoom {
 
   handleAction(action, senderWs) {
     const user = this.sessions.get(senderWs);
+    if (!user) return;
+
+    // rate limit: max 10 actions per second per user
+    const now = Date.now();
+    user.lastActionTimes = user.lastActionTimes.filter(t => now - t < 1000);
+    if (user.lastActionTimes.length >= 10) return;
+    user.lastActionTimes.push(now);
 
     // track spawn counts
     if (user) {
