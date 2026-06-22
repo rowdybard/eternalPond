@@ -287,6 +287,12 @@ html, body {
   color: var(--txt-faint);
   letter-spacing: 1px;
 }
+#fish-lives {
+  font-variant-numeric: tabular-nums;
+  color: var(--teal-soft);
+  letter-spacing: 0.5px;
+  opacity: 0.8;
+}
 #hint { transition: opacity 1s ease; color: var(--txt-faint); }
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 

@@ -2575,6 +2575,51 @@ function applyRemoteAction(action) {
   }
 }
 
+// ===================================================================
+// FISH LIVES COUNTER — analytics: how many visitors load into a fish
+// ===================================================================
+const FISH_LIVES_KEY = 'pond_fish_lives';
+let fishLivesCount = 0;
+let fishLivesReported = false;
+
+function fetchFishLives() {
+  // Try to fetch global count from the worker
+  fetch('https://shared-pond.maxpug17.workers.dev/api/fish-lives')
+    .then(r => r.json())
+    .then(d => {
+      if (d && typeof d.count === 'number') {
+        fishLivesCount = d.count;
+        updateFishLivesDisplay();
+      }
+    })
+    .catch(() => {
+      // fallback to localStorage only
+      try { fishLivesCount = parseInt(localStorage.getItem(FISH_LIVES_KEY) || '0', 10) || 0; } catch (e) {}
+      updateFishLivesDisplay();
+    });
+}
+
+function reportFishLife() {
+  if (fishLivesReported) return;
+  fishLivesReported = true;
+  fishLivesCount++;
+  updateFishLivesDisplay();
+  // store locally
+  try { localStorage.setItem(FISH_LIVES_KEY, String(fishLivesCount)); } catch (e) {}
+  // report to server (fire-and-forget)
+  try {
+    fetch('https://shared-pond.maxpug17.workers.dev/api/fish-lives', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => { if (d && typeof d.count === 'number') { fishLivesCount = d.count; updateFishLivesDisplay(); } })
+      .catch(() => {});
+  } catch (e) {}
+}
+
+function updateFishLivesDisplay() {
+  const el = document.getElementById('fish-lives');
+  if (el) el.textContent = 'Fish Lives Lived: ' + fishLivesCount.toLocaleString();
+}
+
 function spawnPlayerFish() {
   const x = W * 0.5 + (Math.random() - 0.5) * 100;
   const y = H * 0.5 + (Math.random() - 0.5) * 100;
@@ -2584,6 +2629,7 @@ function spawnPlayerFish() {
   myFish = fish; isDead = false;
   respawnBanner.classList.remove('visible');
   ripples.push(new Ripple3D(x, y, { maxRadius: 50 }));
+  reportFishLife();
 }
 
 const CREATURE_EMOJI = { fish: '\ud83d\udc1f', frog: '\ud83d\udc38', dragonfly: '\ud83e\udeb0', lily: '\ud83c\udf3f' };
@@ -2957,6 +3003,9 @@ function seedInitialLife() {
 
 function init() {
   buildEnvironment();
+
+  // fish lives counter — fetch global count on load
+  fetchFishLives();
 
   // retention setup
   const streak = checkStreak();

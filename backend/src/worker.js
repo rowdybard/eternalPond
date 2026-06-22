@@ -7,6 +7,7 @@ export class PondRoom {
     this.lilies = [];
     this.lastPrune = Date.now();
     this.userIdCounter = 0;
+    this.fishLives = null; // cached count, loaded lazily
   }
 
   generateName() {
@@ -16,6 +17,26 @@ export class PondRoom {
   }
 
   async fetch(request) {
+    const url = new URL(request.url);
+
+    // Fish lives analytics endpoint
+    if (url.pathname === '/api/fish-lives') {
+      if (request.method === 'POST') {
+        // increment global counter in DO storage
+        if (this.fishLives === null) this.fishLives = parseInt(await this.state.storage.get('fishLives') || '0', 10);
+        this.fishLives++;
+        await this.state.storage.put('fishLives', this.fishLives);
+        return new Response(JSON.stringify({ count: this.fishLives }), {
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+      // GET — return current count
+      if (this.fishLives === null) this.fishLives = parseInt(await this.state.storage.get('fishLives') || '0', 10);
+      return new Response(JSON.stringify({ count: this.fishLives }), {
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader !== 'websocket') {
       return new Response('Expected WebSocket', { status: 426 });
@@ -161,7 +182,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === '/ws') {
+    if (url.pathname === '/ws' || url.pathname === '/api/fish-lives') {
       const id = env.POND.idFromName('global-pond');
       const obj = env.POND.get(id);
       return obj.fetch(request);
