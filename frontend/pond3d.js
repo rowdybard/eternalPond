@@ -3,7 +3,7 @@
    Three.js r128. All game logic ported from the 2D pond.js:
    AI, eating, events, WebSocket protocol, player fish, red button,
    wave pool. Canvas-2D rendering is replaced by Three.js meshes.
-   GLB models are loaded if present in ../assets/, otherwise the
+   GLB models are loaded if present in assets/, otherwise the
    engine falls back to high-quality procedural meshes.
 =================================================================== */
 
@@ -442,30 +442,30 @@ window.addEventListener('resize', onResize);
 // ASSET SYSTEM — load GLB if available, else procedural fallback
 // ===================================================================
 const ASSETS = {
-  fish: '../assets/fish.glb',
-  frog: '../assets/frog.glb',
-  dragonfly: '../assets/dragonfly.glb',
-  lily: '../assets/lily.glb',
-  bird: '../assets/bird.glb',
-  rocks: '../assets/rocks.glb',
-  reeds: '../assets/reeds.glb',
-  tree_pine: '../assets/tree_pine.glb',
-  tree_birch: '../assets/tree_birch.glb',
-  tree_maple: '../assets/tree_maple.glb',
-  tree_oak: '../assets/tree_oak.glb',
-  tree_autumn: '../assets/tree_autumn.glb',
-  grass: '../assets/grass.glb',
-  grass_tall: '../assets/grass_tall.glb',
-  bush: '../assets/bush.glb',
-  bush_flowers: '../assets/bush_flowers.glb',
-  flowers: '../assets/flowers.glb',
-  bushes: '../assets/bushes.glb',
-  flower_bushes: '../assets/flower_bushes.glb',
-  scifibuilding: '../assets/scifibuilding.glb',
-  sun: '../assets/ps1_style_low_poly_sun.glb',
-  earth: '../assets/ps1_style_low_poly_earth.glb',
-  moon: '../assets/ps1_style_low_poly_moon.glb',
-  penguin: '../assets/low_poly_penguin.glb',
+  fish: 'assets/fish.glb',
+  frog: 'assets/frog.glb',
+  dragonfly: 'assets/dragonfly.glb',
+  lily: 'assets/lily.glb',
+  bird: 'assets/bird.glb',
+  rocks: 'assets/rocks.glb',
+  reeds: 'assets/reeds.glb',
+  tree_pine: 'assets/tree_pine.glb',
+  tree_birch: 'assets/tree_birch.glb',
+  tree_maple: 'assets/tree_maple.glb',
+  tree_oak: 'assets/tree_oak.glb',
+  tree_autumn: 'assets/tree_autumn.glb',
+  grass: 'assets/grass.glb',
+  grass_tall: 'assets/grass_tall.glb',
+  bush: 'assets/bush.glb',
+  bush_flowers: 'assets/bush_flowers.glb',
+  flowers: 'assets/flowers.glb',
+  bushes: 'assets/bushes.glb',
+  flower_bushes: 'assets/flower_bushes.glb',
+  scifibuilding: 'assets/scifibuilding.glb',
+  sun: 'assets/ps1_style_low_poly_sun.glb',
+  earth: 'assets/ps1_style_low_poly_earth.glb',
+  moon: 'assets/ps1_style_low_poly_moon.glb',
+  penguin: 'assets/low_poly_penguin.glb',
 };
 const assetCache = {};
 const gltfLoader = (typeof THREE.GLTFLoader === 'function') ? new THREE.GLTFLoader() : null;

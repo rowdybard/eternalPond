@@ -124,6 +124,7 @@ export class PondRoom {
       if (action.type === 'wave') user.counts.wave++;
       else if (action.type === 'creature' && action.creatureType) user.counts[action.creatureType] = (user.counts[action.creatureType] || 0) + 1;
       else if (action.type === 'lily') user.counts.lily++;
+      else if (action.type === 'plankton') user.counts.plankton = (user.counts.plankton || 0) + 1;
     }
 
     // store action in state
@@ -138,6 +139,7 @@ export class PondRoom {
         this.lilies.push({ x: action.x, y: action.y, ts: Date.now() });
         if (this.lilies.length > 60) this.lilies = this.lilies.slice(-60);
         break;
+      case 'plankton':
       case 'event':
       case 'wavepool':
       case 'birds':
