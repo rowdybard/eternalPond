@@ -1,5 +1,6 @@
 // ===== CONFIG =====
 const WS_URL = 'wss://ws.eternalpond.com/ws';
+const WS_URL_FALLBACK = 'wss://shared-pond.maxpug17.workers.dev/ws';
 
 // ===== PERFORMANCE / QUALITY SCALING =====
 const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth < 768;
@@ -2173,11 +2174,14 @@ function activateWavePool() {
 let ws = null;
 let wsConnected = false;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
+let useFallbackURL = false;
 const onlineCountEl = document.getElementById('online-count');
 
 function connectWS() {
+  const url = useFallbackURL ? WS_URL_FALLBACK : WS_URL;
   try {
-    ws = new WebSocket(WS_URL);
+    ws = new WebSocket(url);
   } catch (e) {
     scheduleReconnect();
     return;
@@ -2188,13 +2192,16 @@ function connectWS() {
     if (!wsConnected && ws) {
       try { ws.close(); } catch(e) {}
       ws = null;
-      onlineCountEl.textContent = 'offline — solo mode';
+      // try fallback URL on next attempt
+      useFallbackURL = !useFallbackURL;
+      scheduleReconnect();
     }
   }, 8000);
 
   ws.onopen = () => {
     clearTimeout(connectTimeout);
     wsConnected = true;
+    reconnectAttempts = 0;
     onlineCountEl.textContent = 'connected';
   };
 
@@ -2208,7 +2215,8 @@ function connectWS() {
   ws.onclose = () => {
     clearTimeout(connectTimeout);
     wsConnected = false;
-    onlineCountEl.textContent = 'offline — solo mode';
+    // alternate URL on each reconnect
+    useFallbackURL = !useFallbackURL;
     scheduleReconnect();
   };
 
@@ -2220,10 +2228,16 @@ function connectWS() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
+  reconnectAttempts++;
+  if (reconnectAttempts > 5) {
+    onlineCountEl.textContent = 'offline — solo mode';
+    return;
+  }
+  const delay = IS_MOBILE ? 5000 : 3000;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWS();
-  }, 3000);
+  }, delay);
 }
 
 function sendAction(action) {
@@ -2492,9 +2506,7 @@ function loop(now) {
   if (frameCount % 4 === 0) updateRedButton();
   if (frameCount % 60 === 0) maybeSpawnRandomBirds();
 
-  } catch (e) {
-    console.error('[POND] Loop error:', e);
-  }
+  } catch (e) {}
   requestAnimationFrame(loop);
 }
 
