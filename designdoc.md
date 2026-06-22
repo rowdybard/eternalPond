@@ -8,7 +8,7 @@ Eternal Pond is a shared, real-time idle pond environment where multiple users c
 ### Frontend (`frontend/`)
 - **`index.html`** — UI layout: canvas, toolbar, cooldown bar, event banner, feed, respawn banner, user panel, status bar
 - **`style.css`** — All styling: glassmorphism UI, animations, responsive/mobile layout
-- **`pond.js`** — Single-file game engine (~2500 lines): all entity classes, rendering, input, networking, main loop
+- **`pond.js`** — Single-file game engine (~2520 lines): all entity classes, rendering, input, networking, main loop
 
 ### Backend (`backend/src/worker.js`)
 - **Cloudflare Worker + Durable Object** (`PondRoom`) managing a single global pond
@@ -16,7 +16,7 @@ Eternal Pond is a shared, real-time idle pond environment where multiple users c
 - State: creature list, lily list, user sessions with spawn counts
 - Deployed to `https://shared-pond.maxpug17.workers.dev`
 - Frontend deployed to Cloudflare Pages (`shared-pond.pages.dev`)
-- WebSocket URL: `wss://ws.eternalpond.com/ws`
+- WebSocket URL: `wss://ws.eternalpond.com/ws` (primary) + `wss://shared-pond.maxpug17.workers.dev/ws` (fallback)
 
 ## Entities
 
@@ -106,7 +106,9 @@ Eternal Pond is a shared, real-time idle pond environment where multiple users c
   - Birds: 18 (vs 36)
   - Trail particles: 150 (vs 400)
   - DPR cap: 1.5 (vs 2)
-- **Error handling**: Main loop wrapped in try/catch to prevent silent crashes
+- **Error handling**: Main loop wrapped in silent try/catch (no console output — was freezing mobile)
+- **WebSocket reliability**: Dual URL fallback, 8s timeout, max 5 reconnects, 5s delay on mobile, all console logging removed from WS code
+- **Snapshot throttling**: Max 20 creatures + 15 lilies on connect, no ripples during snapshot spawn
 
 ## Player System
 - **Spawn**: On WebSocket connect, a player fish spawns at center with random tier
@@ -144,7 +146,7 @@ Eternal Pond is a shared, real-time idle pond environment where multiple users c
 ## UI Elements
 - **Toolbar**: 5 tools — wave, fish, frog, dragonfly, lily
 - **Cooldown bar**: Thin bar above toolbar, fills as cooldown recovers
-- **Feed**: Right-side activity log (max 20 items, auto-scroll)
+- **Feed**: Right-side activity log (max 20 items, auto-scroll) — **to be replaced with toast notifications**
 - **User panel**: Modal showing all online users with spawn counts (click online count to open)
 - **Status bar**: Bottom — online count, user name, hint text
 - **Respawn banner**: Modal shown on player fish death
@@ -157,9 +159,21 @@ Eternal Pond is a shared, real-time idle pond environment where multiple users c
 - **Drag support**: Hold and drag to continuously create waves
 - **Touch support**: Full touch event handling for mobile
 
+## Planned: 3D Pond (`/3d` route)
+- **Three.js** r128 from CDN with OrbitControls
+- **Real CC0 GLB models**: Quaternius Animated Fish Bundle (fish), Quaternius frog, Quaternius lily pad, poly.pizza dragonfly, Quaternius Stylized Nature MegaKit (rocks, reeds)
+- **Scene**: PerspectiveCamera at ~50° pitch, OrbitControls with constraints, FogExp2, animated water surface with vertex displacement, pond floor, directional + hemisphere lighting
+- **Entity rendering**: GLTFLoader loads models once, clones per-entity, AnimationMixer plays embedded swim/idle animations, material tinting for fish tiers
+- **Game logic**: All entity classes, AI, WebSocket, events, spawning ported from pond.js — only rendering changes from Canvas 2D to Three.js meshes
+- **Input**: Raycast from camera to water plane for world coordinates
+- **Mobile**: Reduced water vertices, no shadows, fewer particles, limited AnimationMixers
+- **Notification rework**: Replace feed with toast notifications (bottom-left, auto-fade 4s, max 5, non-interactive, generated pond names like "Splashy Minnow made a wave")
+- **Plan file**: `C:\Users\maxpu\.windsurf\plans\3d-pond-and-notification-rework-4ac4df.md`
+
 ## Deployment
 - **Frontend**: `npx wrangler pages deploy frontend --project-name=shared-pond --commit-dirty=true`
 - **Backend**: `npx wrangler deploy` (from `backend/` directory)
 - **Frontend URL**: `https://<hash>.shared-pond.pages.dev`
 - **Backend URL**: `https://shared-pond.maxpug17.workers.dev`
-- **WebSocket**: `wss://ws.eternalpond.com/ws`
+- **WebSocket primary**: `wss://ws.eternalpond.com/ws`
+- **WebSocket fallback**: `wss://shared-pond.maxpug17.workers.dev/ws`

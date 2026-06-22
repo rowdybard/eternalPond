@@ -3,7 +3,7 @@
 ## Project Structure
 - `frontend/index.html` — UI layout (canvas, toolbar, cooldown bar, event banner, feed, user panel, respawn banner, status bar)
 - `frontend/style.css` — All styling (glassmorphism, animations, responsive/mobile)
-- `frontend/pond.js` — Game engine (~2510 lines): entities, rendering, input, networking, main loop
+- `frontend/pond.js` — Game engine (~2520 lines): entities, rendering, input, networking, main loop
 - `backend/src/worker.js` — Cloudflare Worker + Durable Object (`PondRoom`)
 - `backend/wrangler.toml` — Cloudflare config
 - `designdoc.md` — Full design document
@@ -76,7 +76,7 @@
 - Water displacement grid disabled on mobile
 - Foam/trail/bird caps reduced
 - DPR capped at 1.5
-- Main loop wrapped in try/catch
+- Main loop wrapped in try/catch (silent catch, no console output)
 
 ### UI Fixes (DONE)
 - Feed and user panel clicks no longer trigger canvas actions
@@ -86,15 +86,42 @@
 ### Visual Fixes (DONE)
 - Creatures stay fully opaque until life < 0.3, then fade out (no more random partial transparency)
 - Event timers use real-time instead of frame counting
+- Removed crown triangle indicator from player fish
+
+### WebSocket Reliability (DONE)
+- Dual WebSocket URLs: `wss://shared-pond.maxpug17.workers.dev/ws` (PRIMARY — proven reliable native Cloudflare URL) + `wss://ws.eternalpond.com/ws` (fallback custom domain)
+- Swapped to workers.dev primary: custom domain returns 101 from curl but is unreliable from browsers (Cloudflare custom-domain SSL/WS quirks)
+- Fixed double-flip bug: timeout `ws.close()` triggered onclose, and both flipped `useFallbackURL`, cancelling out so fallback was never used. Now onclose is single source of truth; URL only alternates when a connection never opened
+- 8-second connection timeout before retrying
+- Max 10 reconnect attempts, then stays in solo mode
+- Reconnect delay: 4s on mobile, 2.5s on desktop
+- All console.log/console.error removed from WebSocket code (was freezing mobile)
+- Snapshot throttled: max 20 creatures + 15 lilies on connect (was up to 100 + 60)
+- Snapshot spawns skip ripple creation to avoid particle spike
+- `addCreature` and `addLily` accept `silent` param to skip ripples
+
+## Pending Work
+
+### 3D Pond + Notification Rework (PLANNED)
+- Plan: `C:\Users\maxpu\.windsurf\plans\3d-pond-and-notification-rework-4ac4df.md`
+- **Notification rework**: Replace feed with toast notifications (bottom-left, auto-fade 4s, max 5, non-interactive, generated pond names)
+- **3D pond at `/3d`**: Three.js scene with real CC0 GLB models from Quaternius (fish, frog, lily pad) + poly.pizza (dragonfly)
+  - OrbitControls camera, animated water surface, fog, pond environment
+  - All game logic ported from pond.js (AI, WebSocket, events, spawning)
+  - GLTFLoader, clone-per-entity, AnimationMixer for embedded animations
+  - Mobile quality scaling
+  - Separate route (`/3d/`), 2D stays at root
 
 ## Deployment
 - Frontend: `npx wrangler pages deploy frontend --project-name=shared-pond --commit-dirty=true`
 - Backend: `npx wrangler deploy` (from `backend/`)
 - Frontend URL: `https://<hash>.shared-pond.pages.dev`
 - Backend URL: `https://shared-pond.maxpug17.workers.dev`
-- WebSocket: `wss://ws.eternalpond.com/ws`
+- WebSocket primary: `wss://shared-pond.maxpug17.workers.dev/ws`
+- WebSocket fallback: `wss://ws.eternalpond.com/ws`
 
 ## Known State
-- All systems functional and deployed
+- All 2D systems functional and deployed
 - Mobile performance optimized
-- No known bugs
+- WebSocket reliability improved with fallback URL
+- 3D pond + notification rework planned, not yet started

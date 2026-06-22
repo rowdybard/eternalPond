@@ -1,6 +1,8 @@
 // ===== CONFIG =====
-const WS_URL = 'wss://ws.eternalpond.com/ws';
-const WS_URL_FALLBACK = 'wss://shared-pond.maxpug17.workers.dev/ws';
+// workers.dev is the native, proven-reliable Cloudflare URL (valid SSL + WebSocket).
+// The custom domain is kept as a secondary fallback.
+const WS_URL = 'wss://shared-pond.maxpug17.workers.dev/ws';
+const WS_URL_FALLBACK = 'wss://ws.eternalpond.com/ws';
 
 // ===== PERFORMANCE / QUALITY SCALING =====
 const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth < 768;
@@ -2180,6 +2182,7 @@ const onlineCountEl = document.getElementById('online-count');
 
 function connectWS() {
   const url = useFallbackURL ? WS_URL_FALLBACK : WS_URL;
+  let opened = false;
   try {
     ws = new WebSocket(url);
   } catch (e) {
@@ -2187,19 +2190,16 @@ function connectWS() {
     return;
   }
 
-  // connection timeout — fall back to solo mode if WS doesn't connect in 8s
+  // connection timeout — if it doesn't open in 8s, close it (onclose handles retry)
   const connectTimeout = setTimeout(() => {
-    if (!wsConnected && ws) {
+    if (!wsConnected) {
       try { ws.close(); } catch(e) {}
-      ws = null;
-      // try fallback URL on next attempt
-      useFallbackURL = !useFallbackURL;
-      scheduleReconnect();
     }
   }, 8000);
 
   ws.onopen = () => {
     clearTimeout(connectTimeout);
+    opened = true;
     wsConnected = true;
     reconnectAttempts = 0;
     onlineCountEl.textContent = 'connected';
@@ -2212,28 +2212,30 @@ function connectWS() {
     } catch (e) {}
   };
 
+  // onclose is the single source of truth for reconnect logic
   ws.onclose = () => {
     clearTimeout(connectTimeout);
     wsConnected = false;
-    // alternate URL on each reconnect
-    useFallbackURL = !useFallbackURL;
+    // only alternate URL if this attempt never managed to open
+    if (!opened) useFallbackURL = !useFallbackURL;
     scheduleReconnect();
   };
 
   ws.onerror = () => {
-    clearTimeout(connectTimeout);
-    if (ws) { try { ws.close(); } catch(e) {} }
+    // let onclose do the work; just ensure the socket closes
+    try { ws.close(); } catch(e) {}
   };
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectAttempts++;
-  if (reconnectAttempts > 5) {
+  // keep retrying with capped backoff so it recovers when network returns
+  if (reconnectAttempts > 10) {
     onlineCountEl.textContent = 'offline — solo mode';
     return;
   }
-  const delay = IS_MOBILE ? 5000 : 3000;
+  const delay = IS_MOBILE ? 4000 : 2500;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWS();
