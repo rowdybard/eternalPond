@@ -116,15 +116,28 @@ controls.autoRotateSpeed = 0.28;
 controls.rotateSpeed = 0.65;
 if (controls.touches) controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
-// Constrain pan target to a circular disc around the pond
-const PAN_RADIUS = R_WATER * 1.5;
+// Constrain pan target to a flat circular disc inside the dome — no vertical pan,
+// and keep the camera position inside the dome sphere.
+const PAN_RADIUS = R_WATER * 1.2;
+const DOME_R = R_WATER * 2.4;
 const _panV = new THREE.Vector3();
 controls.addEventListener('change', () => {
+  // lock target Y to 0 — no vertical panning
+  controls.target.y = 0;
+  // clamp target to horizontal disc
   const d = Math.hypot(controls.target.x, controls.target.z);
   if (d > PAN_RADIUS) {
     const ang = Math.atan2(controls.target.z, controls.target.x);
     controls.target.x = Math.cos(ang) * PAN_RADIUS;
     controls.target.z = Math.sin(ang) * PAN_RADIUS;
+  }
+  // clamp camera position inside the dome sphere
+  const camD = Math.hypot(camera.position.x, camera.position.y, camera.position.z);
+  if (camD > DOME_R * 0.92) {
+    const s = DOME_R * 0.92 / camD;
+    camera.position.x *= s;
+    camera.position.y *= s;
+    camera.position.z *= s;
   }
 });
 
@@ -1646,8 +1659,8 @@ function makeTree(scale, glow) {
     const glb = instantiateGLB(key);
     if (glb) {
       const tree = glb.root;
-      tree.scale.multiplyScalar(scale * 3.5);
-      tree.userData.topY = 10 * scale;
+      tree.scale.multiplyScalar(scale * 20);
+      tree.userData.topY = 48 * scale;
       if (glow) {
         tree.traverse(c => {
           if (c.isMesh && c.material) {
@@ -1702,7 +1715,7 @@ function buildEnvironment() {
   const treeScales = [1.0, 1.4]; // two sizes only
   for (let i = 0; i < treeCount; i++) {
     const a = (i / treeCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-    const r = R_WATER * (1.12 + Math.random() * 1.5);
+    const r = R_WATER * (1.15 + Math.random() * 1.0);  // 150..262 — stays inside dome (314)
     const scale = treeScales[Math.floor(Math.random() * treeScales.length)];
     const glow = glowTreeIdx.has(i);
     const tree = makeTree(scale, glow);
