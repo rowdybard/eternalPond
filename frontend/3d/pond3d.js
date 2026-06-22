@@ -418,6 +418,10 @@ const ASSETS = {
   flowers: '../assets/flowers.glb',
   bushes: '../assets/bushes.glb',
   flower_bushes: '../assets/flower_bushes.glb',
+  scifibuilding: '../assets/scifibuilding.glb',
+  sun: '../assets/ps1_style_low_poly_sun.glb',
+  earth: '../assets/ps1_style_low_poly_earth.glb',
+  moon: '../assets/ps1_style_low_poly_moon.glb',
 };
 const assetCache = {};
 const gltfLoader = (typeof THREE.GLTFLoader === 'function') ? new THREE.GLTFLoader() : null;
@@ -1221,6 +1225,9 @@ class LilyPad3D {
     this.flower = Math.random() > 0.6;
     this.placedAt = Date.now();
     this.sinking = false;
+    // wave displacement: offsetX/Z drift away from origin, spring back
+    this.offX = 0; this.offY = 0;
+    this.velX = 0; this.velY = 0;
 
     const glb = assetCache.lily ? instantiateGLB('lily') : null;
     this.model = glb ? glb.root : buildLily(this.flower);
@@ -1235,13 +1242,42 @@ class LilyPad3D {
     if (this.size < this.maxSize) this.size += this.growth;
     this.life -= this.decay;
     if (isOffScreen(this.x, this.y)) return false;
+
+    // wave interaction: check if any wave ring is passing through the lily
+    for (const w of waves) {
+      const d = dist(w.x, w.y, this.x, this.y);
+      const band = Math.abs(d - w.radius);
+      if (band < 60 && w.life > 0.1) {
+        const angle = Math.atan2(this.y - w.y, this.x - w.x);
+        const power = w.force * w.life * w.life * (1 - band / 60) * 0.6;
+        this.velX += Math.cos(angle) * power;
+        this.velY += Math.sin(angle) * power;
+      }
+    }
+    // spring back to origin
+    this.velX -= this.offX * 0.08;
+    this.velY -= this.offY * 0.08;
+    // damping
+    this.velX *= 0.88;
+    this.velY *= 0.88;
+    this.offX += this.velX;
+    this.offY += this.velY;
+
     return this.life > 0;
   }
 
   sync3D() {
     const sinkY = this.sinking ? -(1 - this.life) * 4 : 0;
-    this.mesh.position.set(toWorldX(this.x), 0.12 + sinkY, toWorldZ(this.y));
+    this.mesh.position.set(toWorldX(this.x + this.offX), 0.12 + sinkY, toWorldZ(this.y + this.offY));
     this.mesh.scale.setScalar(Math.max(0.001, this.size * SCALE * VISUAL));
+    // tilt slightly based on displacement direction (riding the wave)
+    if (Math.abs(this.offX) > 0.5 || Math.abs(this.offY) > 0.5) {
+      this.mesh.rotation.z = -this.velX * 0.002;
+      this.mesh.rotation.x = this.velY * 0.002;
+    } else {
+      this.mesh.rotation.z *= 0.9;
+      this.mesh.rotation.x *= 0.9;
+    }
     const fg = this.model.userData.flowerGroup;
     if (fg) fg.visible = this.model.userData.hasFlower && this.size > this.maxSize * 0.8;
     const fade = this.life < 0.3 ? this.life / 0.3 : 1;
@@ -1719,7 +1755,11 @@ function buildEnvironment() {
     const scale = treeScales[Math.floor(Math.random() * treeScales.length)];
     const glow = glowTreeIdx.has(i);
     const tree = makeTree(scale, glow);
-    tree.position.set(Math.cos(a) * r, terrainHeight(r) - 0.6, Math.sin(a) * r);
+    // Compute actual bounding box after scale to get true height for grounding
+    const treeBox = new THREE.Box3().setFromObject(tree);
+    const treeH = treeBox.max.y - treeBox.min.y;
+    const treeCenterY = (treeBox.max.y + treeBox.min.y) / 2;
+    tree.position.set(Math.cos(a) * r, terrainHeight(r) - treeBox.min.y - 0.6, Math.sin(a) * r);
     tree.rotation.y = Math.random() * 6.28;
     forest.add(tree);
     if (glow && lightsPlaced < faerieLights) {
@@ -1927,6 +1967,12 @@ function buildEnvironment() {
 
   scene.add(forest);
 
+  // ---- sci-fi buildings in L-shape around 2 corners of the map ----
+  buildSciFiBuildings();
+
+  // ---- celestial bodies (sun, earth, moon) floating in the space skybox ----
+  buildCelestials();
+
   // ---- energy dome (transparent geodesic shell over the pond) ----
   buildDome();
 
@@ -1935,6 +1981,92 @@ function buildEnvironment() {
 
   // ---- fireflies drifting over the water ----
   if (HQ) buildFireflies();
+}
+
+// ===== CELESTIAL BODIES =====
+// Place GLB sun, earth, and moon as large objects floating in the space
+// skybox outside the dome. Earth orbits slowly, moon orbits earth.
+// The shader sun stays as the "almighty" light source.
+function buildCelestials() {
+  const CELESTIAL_R = 2200; // well outside the dome (314), inside skybox (3000)
+  const celestials = [];
+
+  // Sun GLB — placed high, opposite the shader sun direction
+  if (assetCache.sun) {
+    const sunGlb = instantiateGLB('sun');
+    if (sunGlb) {
+      const sun = sunGlb.root;
+      sun.scale.multiplyScalar(300);
+      const sa = 2.4; // up-back direction
+      sun.position.set(Math.cos(sa) * CELESTIAL_R, CELESTIAL_R * 0.5, Math.sin(sa) * CELESTIAL_R);
+      scene.add(sun);
+      celestials.push({ obj: sun, type: 'sun' });
+    }
+  }
+
+  // Earth GLB — orbits slowly at a fixed radius
+  if (assetCache.earth) {
+    const earthGlb = instantiateGLB('earth');
+    if (earthGlb) {
+      const earth = earthGlb.root;
+      earth.scale.multiplyScalar(120);
+      scene.add(earth);
+      celestials.push({ obj: earth, type: 'earth', orbitR: CELESTIAL_R * 0.7, orbitSpeed: 0.02, orbitAngle: 0, orbitTilt: 0.3 });
+    }
+  }
+
+  // Moon GLB — orbits earth
+  if (assetCache.moon) {
+    const moonGlb = instantiateGLB('moon');
+    if (moonGlb) {
+      const moon = moonGlb.root;
+      moon.scale.multiplyScalar(40);
+      scene.add(moon);
+      celestials.push({ obj: moon, type: 'moon', orbitR: 200, orbitSpeed: 0.15, orbitAngle: 0, parent: null });
+    }
+  }
+
+  window.__celestials = celestials;
+}
+
+// ===== SCI-FI BUILDINGS =====
+// Place scifibuilding.glb in a uniform L-shape around 2 corners of the map,
+// far outside the dome on the outer edges. Massive structures visible from
+// inside the dome through the transparent shell.
+function buildSciFiBuildings() {
+  if (!assetCache.scifibuilding) return;
+  const BUILDING_SCALE = 240; // massive — visible from inside the dome
+  const SPACING = 380; // uniform spacing between buildings
+  const buildR = R_WATER * 4.5; // far outside the dome (dome = R_WATER*2.4)
+
+  // Two L-shaped corners: one at angle 0 (east), one at angle PI (west)
+  // Each L covers ~63 degrees of arc with buildings placed at uniform spacing
+  const corners = [
+    { centerAng: 0,            span: Math.PI * 0.35 },          // east corner
+    { centerAng: Math.PI,      span: Math.PI * 0.35 },          // west corner
+  ];
+
+  for (const corner of corners) {
+    const count = Math.floor(corner.span * buildR / SPACING);
+    for (let i = 0; i < count; i++) {
+      const t = (i / Math.max(count - 1, 1)) - 0.5; // -0.5..0.5
+      const a = corner.centerAng + t * corner.span;
+      const glb = instantiateGLB('scifibuilding');
+      if (!glb) continue;
+      const b = glb.root;
+      // uniform scale
+      b.scale.multiplyScalar(BUILDING_SCALE);
+      // place at map edge, sitting on terrain — use actual bbox for grounding
+      const bBox = new THREE.Box3().setFromObject(b);
+      const bx = Math.cos(a) * buildR;
+      const bz = Math.sin(a) * buildR;
+      const by = terrainHeight(buildR);
+      b.position.set(bx, by - bBox.min.y, bz);
+      // face the pond (rotate Y to look inward)
+      b.rotation.y = a + Math.PI;
+      scene.add(b);
+    }
+  }
 }
 
 // ===== ENERGY DOME =====
@@ -2719,6 +2851,36 @@ function animate() {
       window.__dome.mat.opacity = p;
       window.__dome.shellMat.opacity = 0.03 + 0.02 * Math.sin(t * 0.6);
       window.__dome.ringMat.opacity = 0.25 + 0.08 * Math.sin(t * 1.2);
+    }
+
+    // animate celestial orbits
+    if (window.__celestials) {
+      let earthPos = null;
+      for (const c of window.__celestials) {
+        if (c.type === 'sun') {
+          // sun is fixed, just rotate slowly
+          c.obj.rotation.y = t * 0.05;
+        } else if (c.type === 'earth') {
+          c.orbitAngle += c.orbitSpeed * 0.016 * dt;
+          const ex = Math.cos(c.orbitAngle) * c.orbitR;
+          const ez = Math.sin(c.orbitAngle) * c.orbitR;
+          const ey = Math.sin(c.orbitAngle * 0.5) * c.orbitR * c.orbitTilt;
+          c.obj.position.set(ex, ey + 200, ez);
+          c.obj.rotation.y = t * 0.1;
+          earthPos = c.obj.position;
+        } else if (c.type === 'moon') {
+          c.orbitAngle += c.orbitSpeed * 0.016 * dt;
+          const mx = Math.cos(c.orbitAngle) * c.orbitR;
+          const mz = Math.sin(c.orbitAngle) * c.orbitR;
+          const my = Math.sin(c.orbitAngle * 2) * c.orbitR * 0.3;
+          if (earthPos) {
+            c.obj.position.set(earthPos.x + mx, earthPos.y + my, earthPos.z + mz);
+          } else {
+            c.obj.position.set(mx, my + 200, mz);
+          }
+          c.obj.rotation.y = t * 0.2;
+        }
+      }
     }
 
     // animate billboard grass: face camera + wind sway
