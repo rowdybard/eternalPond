@@ -116,6 +116,49 @@ controls.autoRotateSpeed = 0.28;
 controls.rotateSpeed = 0.65;
 if (controls.touches) controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
+// Override the built-in pan with a Y=0 plane raycast pan that works at any
+// camera angle, including nearly horizontal (where the default screen-space
+// pan breaks because the ray becomes parallel to the pan plane).
+const _panRay = new THREE.Raycaster();
+const _panMouse = new THREE.Vector2();
+const _panHit = new THREE.Vector3();
+const _panLast = new THREE.Vector3();
+const _panPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y=0 plane
+let _panActive = false;
+
+function _panNDC(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  _panMouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  _panMouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  _panRay.setFromCamera(_panMouse, camera);
+  return _panRay.ray.intersectPlane(_panPlane, _panHit);
+}
+
+// Replace the controls' pan method — called by OrbitControls on right-drag
+controls.pan = function(deltaX, deltaY) {
+  // no-op: we handle pan manually via pointer events below
+};
+
+// Custom pan via pointer events
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 2) return; // right-click only
+  if (_panNDC(e.clientX, e.clientY)) {
+    _panLast.copy(_panHit);
+    _panActive = true;
+  }
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!_panActive) return;
+  if (_panNDC(e.clientX, e.clientY)) {
+    // move target by the delta (drag the world opposite to mouse movement)
+    controls.target.x += _panLast.x - _panHit.x;
+    controls.target.z += _panLast.z - _panHit.z;
+    _panLast.copy(_panHit);
+  }
+});
+window.addEventListener('pointerup', () => { _panActive = false; });
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
 // Constrain pan target to a flat circular disc inside the dome — no vertical pan,
 // and keep the camera position inside the dome sphere.
 const PAN_RADIUS = R_WATER * 1.2;
@@ -2087,8 +2130,8 @@ function buildSciFiBuildings() {
       const bz = Math.sin(a) * buildR;
       const by = terrainHeight(buildR);
       b.position.set(bx, by - bBox.min.y, bz);
-      // face the pond (rotate Y to look inward)
-      b.rotation.y = a + Math.PI;
+      // face outward (detailed side away from pond, so interior faces the pond)
+      b.rotation.y = a;
       scene.add(b);
     }
   }
