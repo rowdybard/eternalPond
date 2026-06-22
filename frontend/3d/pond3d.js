@@ -869,6 +869,7 @@ class Fish3D {
     this.isPlayer = !!isPlayer;
     this.name = '';
     this.bob = Math.random() * Math.PI * 2;
+    this.invuln = 0; // invulnerability timer in frames (90s ~ 5400 frames at 60fps)
 
     const glb = assetCache.fish ? instantiateGLB('fish') : null;
     this.model = glb ? glb.root : buildFish(this.color, this.tier);
@@ -881,6 +882,7 @@ class Fish3D {
 
   setPlayer(name) {
     this.isPlayer = true; this.name = name; this.color = '#00f5d4'; this.decay = 0;
+    this.invuln = 5400; // ~90 seconds at 60fps
     // re-tint procedural model cyan
     if (this.model.userData && this.model.userData.materials) {
       const c = new THREE.Color('#00f5d4');
@@ -894,6 +896,7 @@ class Fish3D {
     this.bob += 0.04;
     this.turnTimer -= dt;
     this.eatCooldown -= dt;
+    if (this.invuln > 0) this.invuln -= dt;
 
     const tierData = FISH_TIERS[this.tier];
     if (tierData.eatCount > 0 && this.eaten < tierData.eatCount && this.eatCooldown <= 0) {
@@ -901,7 +904,7 @@ class Fish3D {
         let nearest = null, nearestDist = tierData.eatRange;
         for (const c of creatures) {
           if (c === this) continue;
-          if (c.type === 'fish' && c.tier < this.tier) {
+          if (c.type === 'fish' && c.tier < this.tier && !(c.invuln > 0)) {
             const d = dist(this.x, this.y, c.x, c.y);
             if (d < nearestDist) { nearest = c; nearestDist = d; }
           } else if (c.type === 'dragonfly' && this.tier >= 1) {
@@ -971,6 +974,16 @@ class Fish3D {
     if (this.model.userData.glow) this.model.userData.glow.intensity = 0.7 + Math.sin(this.tailPhase * 0.5) * 0.3;
     const fade = this.life < 0.3 ? this.life / 0.3 : 1;
     if (fade < 1) setGroupOpacity(this.model, fade);
+    // invulnerability visual: pulsing emissive glow
+    if (this.invuln > 0) {
+      const pulse = 0.5 + 0.5 * Math.sin(this.tailPhase * 0.3);
+      this.model.traverse(c => {
+        if (c.isMesh && c.material && c.material.emissive) {
+          c.material.emissive.setHex(0x00f5d4);
+          c.material.emissiveIntensity = 0.3 + pulse * 0.5;
+        }
+      });
+    }
     if (this.nameSprite) { this.nameSprite.position.set(toWorldX(this.x), 2.6, toWorldZ(this.y)); this.nameSprite.material.opacity = fade; }
   }
 
@@ -1987,8 +2000,18 @@ function buildEnvironment() {
 // skybox outside the dome. Earth orbits slowly, moon orbits earth.
 // The shader sun stays as the "almighty" light source.
 function buildCelestials() {
-  const CELESTIAL_R = 2200; // well outside the dome (314), inside skybox (3000)
+  const CELESTIAL_R = 2200;
   const celestials = [];
+
+  // Helper: disable fog on all materials in a GLB root (they're far outside fog range)
+  function noFog(obj) {
+    obj.traverse(c => {
+      if (c.isMesh && c.material) {
+        c.material.fog = false;
+        if (c.material.emissive) c.material.emissiveIntensity = Math.max(c.material.emissiveIntensity || 0, 0.3);
+      }
+    });
+  }
 
   // Sun GLB — placed high, opposite the shader sun direction
   if (assetCache.sun) {
@@ -1996,7 +2019,8 @@ function buildCelestials() {
     if (sunGlb) {
       const sun = sunGlb.root;
       sun.scale.multiplyScalar(150);
-      const sa = 2.4; // up-back direction
+      noFog(sun);
+      const sa = 2.4;
       sun.position.set(Math.cos(sa) * CELESTIAL_R, CELESTIAL_R * 0.5, Math.sin(sa) * CELESTIAL_R);
       scene.add(sun);
       celestials.push({ obj: sun, type: 'sun' });
@@ -2009,8 +2033,9 @@ function buildCelestials() {
     if (earthGlb) {
       const earth = earthGlb.root;
       earth.scale.multiplyScalar(60);
+      noFog(earth);
       scene.add(earth);
-      celestials.push({ obj: earth, type: 'earth', orbitR: CELESTIAL_R * 0.7, orbitSpeed: 0.02, orbitAngle: 0, orbitTilt: 0.3 });
+      celestials.push({ obj: earth, type: 'earth', orbitR: CELESTIAL_R * 0.7, orbitSpeed: 0.005, orbitAngle: 0, orbitTilt: 0.3 });
     }
   }
 
@@ -2020,8 +2045,9 @@ function buildCelestials() {
     if (moonGlb) {
       const moon = moonGlb.root;
       moon.scale.multiplyScalar(20);
+      noFog(moon);
       scene.add(moon);
-      celestials.push({ obj: moon, type: 'moon', orbitR: 200, orbitSpeed: 0.15, orbitAngle: 0, parent: null });
+      celestials.push({ obj: moon, type: 'moon', orbitR: 200, orbitSpeed: 0.04, orbitAngle: 0, parent: null });
     }
   }
 
@@ -2036,7 +2062,7 @@ function buildSciFiBuildings() {
   if (!assetCache.scifibuilding) return;
   const BUILDING_SCALE = 120; // massive — visible from inside the dome
   const SPACING = 380; // uniform spacing between buildings
-  const buildR = R_WATER * 4.5; // far outside the dome (dome = R_WATER*2.4)
+  const buildR = R_WATER * 4.5 - 75; // moved 75 units closer to the pond
 
   // Two L-shaped corners: one at angle 0 (east), one at angle PI (west)
   // Each L covers ~63 degrees of arc with buildings placed at uniform spacing
@@ -2910,15 +2936,14 @@ function animate() {
       let earthPos = null;
       for (const c of window.__celestials) {
         if (c.type === 'sun') {
-          // sun is fixed, just rotate slowly
-          c.obj.rotation.y = t * 0.05;
+          c.obj.rotation.y = t * 0.02;
         } else if (c.type === 'earth') {
           c.orbitAngle += c.orbitSpeed * 0.016 * dt;
           const ex = Math.cos(c.orbitAngle) * c.orbitR;
           const ez = Math.sin(c.orbitAngle) * c.orbitR;
           const ey = Math.sin(c.orbitAngle * 0.5) * c.orbitR * c.orbitTilt;
           c.obj.position.set(ex, ey + 200, ez);
-          c.obj.rotation.y = t * 0.1;
+          c.obj.rotation.y = t * 0.03;
           earthPos = c.obj.position;
         } else if (c.type === 'moon') {
           c.orbitAngle += c.orbitSpeed * 0.016 * dt;
@@ -2930,7 +2955,7 @@ function animate() {
           } else {
             c.obj.position.set(mx, my + 200, mz);
           }
-          c.obj.rotation.y = t * 0.2;
+          c.obj.rotation.y = t * 0.05;
         }
       }
     }
