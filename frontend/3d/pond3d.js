@@ -1635,12 +1635,14 @@ function makeWillowTree(scale, glow) {
 
 const TREE_GLB_KEYS = ['tree_pine', 'tree_birch', 'tree_maple', 'tree_oak', 'tree_autumn'];
 const TREE_BUILDERS = [makePineTree, makeOakTree, makeBirchTree, makeWillowTree];
+let treeTypeCounter = 0;
 
 function makeTree(scale, glow) {
-  // Try GLB tree assets first, fall back to procedural builders
+  // Cycle through GLB tree types evenly for consistent distribution
   const availableGLBs = TREE_GLB_KEYS.filter(k => assetCache[k]);
   if (availableGLBs.length > 0) {
-    const key = availableGLBs[Math.floor(Math.random() * availableGLBs.length)];
+    const key = availableGLBs[treeTypeCounter % availableGLBs.length];
+    treeTypeCounter++;
     const glb = instantiateGLB(key);
     if (glb) {
       const tree = glb.root;
@@ -1688,17 +1690,20 @@ function buildEnvironment() {
   // ---- continuous bowl terrain: pond basin -> shore -> forest floor ----
   buildTerrain(forest, HQ);
 
-  // ---- trees ----
-  const treeCount = HQ ? 26 : 9;
+  // ---- trees — 36 trees, all 5 GLB types, 1-2 sizes each ----
+  const treeCount = HQ ? 36 : 12;
   const glowTreeIdx = new Set();
-  while (glowTreeIdx.size < (HQ ? 7 : 2)) glowTreeIdx.add(Math.floor(Math.random() * treeCount));
-  const faerieLights = HQ ? 4 : 0;
+  while (glowTreeIdx.size < (HQ ? 8 : 2)) glowTreeIdx.add(Math.floor(Math.random() * treeCount));
+  const faerieLights = HQ ? 5 : 0;
   let lightsPlaced = 0;
   const lightCols = [0x46e6c0, 0xbb8cff, 0x8ce0ff, 0xffd27a];
+  // Assign each tree a specific GLB type + one of 2 fixed sizes for consistency
+  const treeTypes = TREE_GLB_KEYS;
+  const treeScales = [1.0, 1.4]; // two sizes only
   for (let i = 0; i < treeCount; i++) {
-    const a = (i / treeCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
-    const r = R_WATER * (1.08 + Math.random() * 1.7);
-    const scale = 0.85 + Math.random() * 1.25;
+    const a = (i / treeCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+    const r = R_WATER * (1.12 + Math.random() * 1.5);
+    const scale = treeScales[Math.floor(Math.random() * treeScales.length)];
     const glow = glowTreeIdx.has(i);
     const tree = makeTree(scale, glow);
     tree.position.set(Math.cos(a) * r, terrainHeight(r) - 0.6, Math.sin(a) * r);
