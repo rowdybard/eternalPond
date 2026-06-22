@@ -1,15 +1,26 @@
 // ===== CONFIG =====
 const WS_URL = 'wss://ws.eternalpond.com/ws';
+
+// ===== PERFORMANCE / QUALITY SCALING =====
+const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth < 768;
+const LOW_QUALITY = IS_MOBILE;
+
 const MAX_CREATURES = 80;
 const MAX_RIPPLES = 120;
 const MAX_LILIES = 40;
 const MAX_WAVES = 30;
-const MAX_FOAM = 300;
-const MAX_BIRDS = 12;
+const MAX_FOAM = LOW_QUALITY ? 120 : 300;
+const MAX_BIRDS = LOW_QUALITY ? 18 : 36;
+const MAX_TRAIL_PARTICLES = LOW_QUALITY ? 150 : 400;
 const WAVE_COOLDOWN = 1500;
 const WAVE_COOLUP = 500;
 const LILY_PLACE_COOLDOWN = 2000;
 const OFFSCREEN_MARGIN = 80;
+const CAUSTIC_GRID_SIZE = LOW_QUALITY ? 16 : 36;
+const SURFACE_NOISE_COUNT = LOW_QUALITY ? 30 : 80;
+const GOD_RAY_COUNT = LOW_QUALITY ? 0 : 6;
+const SPECULAR_COUNT = LOW_QUALITY ? 3 : 7;
+const WATER_GRID_ENABLED = !LOW_QUALITY;
 
 // ===== CANVAS SETUP =====
 const canvas = document.getElementById('pond');
@@ -17,7 +28,7 @@ const ctx = canvas.getContext('2d');
 let W = 0, H = 0, DPR = 1;
 
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  DPR = Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.5 : 2);
   W = window.innerWidth;
   H = window.innerHeight;
   canvas.width = W * DPR;
@@ -25,6 +36,7 @@ function resize() {
   canvas.style.width = W + 'px';
   canvas.style.height = H + 'px';
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (typeof initWaterGrid === 'function') initWaterGrid();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -102,6 +114,11 @@ class Wave {
         l.life -= 0.15; // single hit, not per-frame
         this.damagedLilies.add(l);
       }
+    }
+
+    // disturb water grid at wave front
+    if (typeof disturbWater === 'function') {
+      disturbWater(this.x, this.y, waveStrength * 3, 60);
     }
 
     // foam generation — continuous at crest, proportional to wave energy
@@ -253,6 +270,54 @@ class FoamParticle {
       ctx.arc(this.x - r * 0.25, this.y - r * 0.25, r * 0.4, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+}
+
+// ===== ENTITY: TRAIL PARTICLE (procedural dispersing creature trail) =====
+class TrailParticle {
+  constructor(x, y, color, size) {
+    this.x = x;
+    this.y = y;
+    this.vx = (Math.random() - 0.5) * 0.5;
+    this.vy = (Math.random() - 0.5) * 0.5;
+    this.color = color;
+    this.size = size * (0.3 + Math.random() * 0.4);
+    this.life = 1;
+    this.decay = 0.008 + Math.random() * 0.01;
+    this.spread = 0;
+  }
+
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.vx *= 0.97;
+    this.vy *= 0.97;
+    this.spread += 0.03 * dt;
+    this.life -= this.decay * dt;
+    return this.life > 0;
+  }
+
+  draw(ctx) {
+    const r = Math.max(0.1, this.size * this.life);
+    const a = this.life * 0.25;
+    ctx.fillStyle = rgbaFromHex(this.color, a);
+    ctx.beginPath();
+    ctx.arc(this.x + (Math.random() - 0.5) * this.spread, this.y + (Math.random() - 0.5) * this.spread, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+let trailParticles = [];
+
+function emitTrail(x, y, color, size, count) {
+  if (trailParticles.length >= MAX_TRAIL_PARTICLES) return;
+  const n = count || 1;
+  for (let i = 0; i < n; i++) {
+    trailParticles.push(new TrailParticle(
+      x + (Math.random() - 0.5) * size * 0.5,
+      y + (Math.random() - 0.5) * size * 0.5,
+      color, size
+    ));
   }
 }
 
@@ -412,9 +477,21 @@ class Fish {
     this.vx *= 0.96;
     this.vy *= 0.96;
 
+    // disturb water surface as fish moves
+    if (typeof disturbWater === 'function' && (Math.abs(this.vx) > 0.5 || Math.abs(this.vy) > 0.5 || this.speed > 0.3)) {
+      disturbWater(this.x, this.y, 0.3 * this.growthScale, 30 * this.growthScale);
+    }
+
     // trail
     this.trail.push({ x: this.x, y: this.y });
     if (this.trail.length > 12) this.trail.shift();
+
+    // emit dispersing trail particles
+    if (this.speed > 0.3 || Math.abs(this.vx) > 0.5 || Math.abs(this.vy) > 0.5) {
+      emitTrail(this.x - Math.cos(this.angle) * this.size * 0.5,
+                this.y - Math.sin(this.angle) * this.size * 0.5,
+                this.color, this.size * this.growthScale, 1);
+    }
 
     this.life -= this.decay;
 
@@ -427,13 +504,16 @@ class Fish {
   draw(ctx) {
     const sz = this.size * this.growthScale;
 
-    // trail — fading color echoes
+    // trail — procedural dispersing particles
     for (let i = 0; i < this.trail.length; i++) {
       const t = this.trail[i];
-      const a = (i / this.trail.length) * 0.15 * this.life;
+      const progress = i / this.trail.length;
+      const a = progress * 0.2 * this.life;
+      const spread = (1 - progress) * sz * 0.15;
+      const r = Math.max(0.1, sz * 0.15 * progress + spread * 0.3);
       ctx.fillStyle = rgbaFromHex(this.color, a);
       ctx.beginPath();
-      ctx.arc(t.x, t.y, sz * 0.2 * (i / this.trail.length), 0, Math.PI * 2);
+      ctx.arc(t.x + (Math.random() - 0.5) * spread, t.y + (Math.random() - 0.5) * spread, r, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -446,7 +526,7 @@ class Fish {
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
-    ctx.globalAlpha = this.life;
+    ctx.globalAlpha = this.life < 0.3 ? this.life / 0.3 : 1;
 
     // tail — forked with gradient
     const tailWag = Math.sin(this.tailPhase) * 0.4;
@@ -553,21 +633,11 @@ class Fish {
     // player name tag (drawn unrotated)
     if (this.isPlayer && this.name) {
       ctx.save();
-      ctx.globalAlpha = this.life;
+      ctx.globalAlpha = this.life < 0.3 ? this.life / 0.3 : 1;
       ctx.fillStyle = 'rgba(0, 245, 212, 0.9)';
       ctx.font = 'bold 10px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(this.name, this.x, this.y - sz * 1.3);
-      // small crown indicator
-      ctx.fillStyle = 'rgba(255, 215, 0, 0.8)';
-      ctx.beginPath();
-      ctx.moveTo(this.x - sz * 0.4, this.y - sz * 1.1);
-      ctx.lineTo(this.x - sz * 0.2, this.y - sz * 1.5);
-      ctx.lineTo(this.x, this.y - sz * 1.1);
-      ctx.lineTo(this.x + sz * 0.2, this.y - sz * 1.5);
-      ctx.lineTo(this.x + sz * 0.4, this.y - sz * 1.1);
-      ctx.closePath();
-      ctx.fill();
       ctx.restore();
     }
     ctx.globalAlpha = 1;
@@ -601,6 +671,7 @@ class Frog {
     this.tongueOriginY = 0;
     this.eatCooldown = 0;
     this.onLily = null;
+    this.relaxPhase = 0;
   }
 
   update(dt) {
@@ -608,7 +679,7 @@ class Frog {
     this.blinkTimer -= dt;
     this.eatCooldown -= dt;
 
-    // try to eat dragonfly — scan for prey
+    // try to eat dragonfly — scan for prey (not while relaxing)
     if (this.state === 'sitting' && this.eatCooldown <= 0 && this.tongueState === 'idle') {
       if (Math.random() < 0.015) {
         let nearest = null;
@@ -677,6 +748,15 @@ class Frog {
       }
     }
 
+    // update relax phase for breathing animation
+    if (this.state === 'relaxing') {
+      this.relaxPhase += 0.03 * dt;
+      // occasional tiny contentment ripple
+      if (Math.random() < 0.003) {
+        ripples.push(new Ripple(this.x, this.y, { maxRadius: 20, speed: 0.6 }));
+      }
+    }
+
     // check lily pad proximity for sitting
     if (this.state === 'sitting' && !this.onLily) {
       for (const l of lilies) {
@@ -690,7 +770,7 @@ class Frog {
     }
     if (this.onLily && this.onLily.life <= 0.3) this.onLily = null;
 
-    if (this.state === 'sitting' && this.timer <= 0 && this.tongueState === 'idle') {
+    if ((this.state === 'sitting' || this.state === 'relaxing') && this.timer <= 0 && this.tongueState === 'idle') {
       const distHop = 80 + Math.random() * 120;
       const ang = Math.random() * Math.PI * 2;
       this.hopFrom = { x: this.x, y: this.y };
@@ -712,9 +792,27 @@ class Frog {
       if (this.hopProgress >= 1) {
         this.x = this.hopTo.x;
         this.y = this.hopTo.y;
-        this.state = 'sitting';
-        this.timer = 80 + Math.random() * 200;
-        ripples.push(new Ripple(this.x, this.y, { maxRadius: 45 }));
+        // check if landed on a lily pad
+        let landedOnLily = null;
+        for (const l of lilies) {
+          if (l.life > 0.5 && dist(this.x, this.y, l.x, l.y) < l.size * 0.8) {
+            landedOnLily = l;
+            this.x = l.x;
+            this.y = l.y;
+            break;
+          }
+        }
+        if (landedOnLily) {
+          this.state = 'relaxing';
+          this.onLily = landedOnLily;
+          this.timer = 300 + Math.random() * 200; // ~5-8 seconds extra
+          this.relaxPhase = 0;
+          ripples.push(new Ripple(this.x, this.y, { maxRadius: 35 }));
+        } else {
+          this.state = 'sitting';
+          this.timer = 80 + Math.random() * 200;
+          ripples.push(new Ripple(this.x, this.y, { maxRadius: 45 }));
+        }
       }
     }
 
@@ -733,9 +831,11 @@ class Frog {
     const sz = this.size * this.growthScale;
     ctx.save();
     ctx.translate(this.x, this.y);
-    ctx.globalAlpha = this.life;
+    ctx.globalAlpha = this.life < 0.3 ? this.life / 0.3 : 1;
 
     const hopY = this.state === 'hopping' ? -Math.sin(this.hopProgress * Math.PI) * 30 : 0;
+    const relaxBob = this.state === 'relaxing' ? Math.sin(this.relaxPhase) * 2 : 0;
+    const relaxScale = this.state === 'relaxing' ? 1 + Math.sin(this.relaxPhase) * 0.03 : 1;
 
     // soft shadow on water
     ctx.fillStyle = `rgba(0, 0, 0, ${0.1 * (1 - Math.abs(hopY) / 30)})`;
@@ -743,7 +843,8 @@ class Frog {
     ctx.ellipse(0, sz * 0.6, sz * 0.8, sz * 0.2, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.translate(0, hopY);
+    ctx.translate(0, hopY + relaxBob);
+    if (relaxScale !== 1) ctx.scale(relaxScale, relaxScale);
 
     // legs (visible when hopping) with webbed feet
     if (this.state === 'hopping') {
@@ -840,6 +941,7 @@ class Frog {
 
     // eyes — bulbous with highlights
     const blinking = this.blinkTimer < 8 && this.blinkTimer > 0;
+    const relaxing = this.state === 'relaxing';
     // eye bumps
     const eyeGrad = ctx.createRadialGradient(0, -sz * 0.6, 0, 0, -sz * 0.5, sz * 0.4);
     eyeGrad.addColorStop(0, '#5a8c4a');
@@ -850,7 +952,18 @@ class Frog {
     ctx.arc(sz * 0.4, -sz * 0.5, sz * 0.3, 0, Math.PI * 2);
     ctx.fill();
 
-    if (!blinking) {
+    if (relaxing) {
+      // contented squint — happy closed eyes (curved arcs)
+      ctx.strokeStyle = 'rgba(20, 40, 15, 0.7)';
+      ctx.lineWidth = sz * 0.06;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(-sz * 0.4, -sz * 0.5, sz * 0.15, 0.2, Math.PI - 0.2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sz * 0.4, -sz * 0.5, sz * 0.15, 0.2, Math.PI - 0.2);
+      ctx.stroke();
+    } else if (!blinking) {
       // whites
       ctx.fillStyle = 'rgba(255,255,255,0.9)';
       ctx.beginPath();
@@ -931,6 +1044,13 @@ class Dragonfly {
     this.vx *= 0.95;
     this.vy *= 0.95;
 
+    // emit trail when darting
+    if (this.state === 'darting' && this.speed > 1) {
+      emitTrail(this.x - Math.cos(this.angle) * this.size * 0.5,
+                this.y - Math.sin(this.angle) * this.size * 0.5,
+                this.color, this.size * 0.5, 1);
+    }
+
     // bounce off edges
     const margin = 30;
     if (this.x < margin) { this.x = margin; this.angle = Math.PI - this.angle; }
@@ -953,7 +1073,7 @@ class Dragonfly {
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
-    ctx.globalAlpha = this.life;
+    ctx.globalAlpha = this.life < 0.3 ? this.life / 0.3 : 1;
 
     // wings — iridescent with shimmer
     const wingY = Math.sin(this.wingPhase) * 4;
@@ -1067,7 +1187,7 @@ class LilyPad {
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.rotation);
-    ctx.globalAlpha = this.life;
+    ctx.globalAlpha = this.life < 0.3 ? this.life / 0.3 : 1;
 
     const s = Math.max(0.1, this.size);
 
@@ -1164,21 +1284,23 @@ class LilyPad {
 
 // ===== ENTITY: BIRD =====
 class Bird {
-  constructor(targetFrog) {
-    this.target = targetFrog;
+  constructor(targetCreature) {
+    this.target = targetCreature;
     // pick entry edge perpendicular to target position
     const side = Math.random() < 0.5 ? 'left' : 'right';
     this.x = side === 'left' ? -60 : W + 60;
     this.y = -40 + Math.random() * H * 0.3;
     this.vx = 0;
     this.vy = 0;
-    this.state = 'diving'; // diving, grabbing, escaping
+    this.state = 'diving'; // diving, swooping, grabbing, escaping
     this.wingPhase = Math.random() * Math.PI * 2;
     this.size = 18 + Math.random() * 8;
     this.angle = 0;
-    this.grabbedFrog = false;
+    this.grabbedCreature = false;
     this.life = 1;
     this.exitTimer = 0;
+    this.swoopScale = 1;
+    this.swoopPhase = 0;
     this.color = ['#2a2a2a', '#3a2a1a', '#1a1a2a'][Math.floor(Math.random() * 3)];
   }
 
@@ -1186,28 +1308,69 @@ class Bird {
     this.wingPhase += 0.4 * dt;
 
     if (this.state === 'diving') {
-      // steer toward target frog
+      // steer toward target creature
       if (this.target && creatures.includes(this.target) && this.target.life > 0) {
         const dx = this.target.x - this.x;
         const dy = this.target.y - this.y;
         const d = Math.sqrt(dx * dx + dy * dy);
-        const speed = 6;
+        const speed = 3.5;
         this.vx = (dx / d) * speed;
         this.vy = (dy / d) * speed;
         this.angle = Math.atan2(this.vy, this.vx);
 
-        if (d < this.size * 0.8) {
-          // grab the frog!
-          this.state = 'escaping';
-          this.grabbedFrog = true;
-          this.target.life = 0;
-          this.exitTimer = 0;
-          ripples.push(new Ripple(this.target.x, this.target.y, { maxRadius: 60 }));
+        if (d < this.size * 3) {
+          // close enough — start swooping descent
+          this.state = 'swooping';
+          this.swoopPhase = 0;
         }
       } else {
         // target gone — fly across and leave
         this.state = 'escaping';
         this.exitTimer = 0;
+      }
+    } else if (this.state === 'swooping') {
+      // scale down then up to simulate dropping to grab
+      this.swoopPhase += 0.08 * dt;
+      if (this.swoopPhase < 0.5) {
+        // diving down — scale smaller
+        this.swoopScale = 1 - this.swoopPhase * 0.6;
+      } else {
+        // rising back up — scale larger
+        this.swoopScale = 0.4 + (this.swoopPhase - 0.5) * 1.2;
+      }
+
+      // continue steering toward target but slower
+      if (this.target && creatures.includes(this.target) && this.target.life > 0) {
+        const dx = this.target.x - this.x;
+        const dy = this.target.y - this.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const speed = 2.5;
+        this.vx = (dx / d) * speed;
+        this.vy = (dy / d) * speed;
+        this.angle = Math.atan2(this.vy, this.vx);
+
+        if (this.swoopPhase >= 1) {
+          // grab attempt — always succeeds if still close
+          if (d < this.size * 2) {
+            this.state = 'escaping';
+            this.grabbedCreature = true;
+            this.target.life = 0;
+            this.swoopScale = 1;
+            this.exitTimer = 0;
+            ripples.push(new Ripple(this.target.x, this.target.y, { maxRadius: 60 }));
+            disturbWater(this.target.x, this.target.y, 6, 80);
+          } else {
+            // missed — fly away
+            this.state = 'escaping';
+            this.exitTimer = 0;
+            this.swoopScale = 1;
+          }
+        }
+      } else {
+        // target gone during swoop — escape
+        this.state = 'escaping';
+        this.exitTimer = 0;
+        this.swoopScale = 1;
       }
     } else if (this.state === 'escaping') {
       // fly upward and away
@@ -1238,8 +1401,13 @@ class Bird {
     const sz = this.size;
     const wingY = Math.sin(this.wingPhase) * sz * 0.6;
 
+    // apply swoop scale
+    if (this.swoopScale !== 1) {
+      ctx.scale(this.swoopScale, this.swoopScale);
+    }
+
     // shadow on water below (depth illusion — darker, more defined)
-    if (this.state === 'diving' && this.y < H - 20) {
+    if ((this.state === 'diving' || this.state === 'swooping') && this.y < H - 20) {
       ctx.save();
       ctx.rotate(-this.angle);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
@@ -1338,7 +1506,7 @@ class Bird {
     ctx.fill();
 
     // talons if grabbing
-    if (this.grabbedFrog) {
+    if (this.grabbedCreature) {
       ctx.strokeStyle = '#c88010';
       ctx.lineWidth = 1.5;
       ctx.lineCap = 'round';
@@ -1390,6 +1558,18 @@ function addCreature(type, x, y, extra) {
   }
   creatures.push(c);
   ripples.push(new Ripple(x, y, { maxRadius: 50 }));
+
+  // if player is dead and a new fish spawns, it becomes the player's fish
+  if (isDead && type === 'fish') {
+    c.isPlayer = true;
+    c.name = myUserName;
+    c.decay = 0;
+    c.color = '#00f5d4';
+    myFish = c;
+    isDead = false;
+    respawnBanner.classList.remove('visible');
+    ripples.push(new Ripple(c.x, c.y, { maxRadius: 50 }));
+  }
 }
 
 let lastLilyPlace = { x: -999, y: -999, time: 0 };
@@ -1421,7 +1601,7 @@ let causticTime = 0;
 let surfaceNoise = [];
 
 // pre-generate surface noise points
-for (let i = 0; i < 80; i++) {
+for (let i = 0; i < SURFACE_NOISE_COUNT; i++) {
   surfaceNoise.push({
     x: Math.random(),
     y: Math.random(),
@@ -1432,9 +1612,126 @@ for (let i = 0; i < 80; i++) {
   });
 }
 
+// ===== AMBIENT WATER DISPLACEMENT GRID =====
+const WATER_GRID_COLS = LOW_QUALITY ? 12 : 24;
+const WATER_GRID_ROWS = LOW_QUALITY ? 8 : 16;
+let waterGrid = [];
+let waterGridW = 0, waterGridH = 0;
+
+function initWaterGrid() {
+  waterGridW = W / WATER_GRID_COLS;
+  waterGridH = H / WATER_GRID_ROWS;
+  waterGrid = [];
+  for (let i = 0; i <= WATER_GRID_COLS; i++) {
+    waterGrid[i] = [];
+    for (let j = 0; j <= WATER_GRID_ROWS; j++) {
+      waterGrid[i][j] = {
+        x: i * waterGridW,
+        y: j * waterGridH,
+        dx: 0,
+        dy: 0,
+        vx: 0,
+        vy: 0,
+        phase: Math.random() * Math.PI * 2,
+        freq: 0.3 + Math.random() * 0.4
+      };
+    }
+  }
+}
+initWaterGrid();
+
+function disturbWater(x, y, strength, radius) {
+  const gi = Math.round(x / waterGridW);
+  const gj = Math.round(y / waterGridH);
+  const r = Math.ceil(radius / Math.min(waterGridW, waterGridH));
+  for (let i = Math.max(0, gi - r); i <= Math.min(WATER_GRID_COLS, gi + r); i++) {
+    for (let j = Math.max(0, gj - r); j <= Math.min(WATER_GRID_ROWS, gj + r); j++) {
+      const p = waterGrid[i][j];
+      const d = dist(x, y, p.x, p.y);
+      if (d < radius) {
+        const falloff = 1 - d / radius;
+        const angle = Math.atan2(p.y - y, p.x - x);
+        p.vx += Math.cos(angle) * strength * falloff;
+        p.vy += Math.sin(angle) * strength * falloff;
+      }
+    }
+  }
+}
+
+function updateWaterGrid(dt) {
+  const tension = 0.025;
+  const damping = 0.96;
+  const ambientAmp = 0.3;
+
+  for (let i = 0; i <= WATER_GRID_COLS; i++) {
+    for (let j = 0; j <= WATER_GRID_ROWS; j++) {
+      const p = waterGrid[i][j];
+      // ambient undulation
+      const ax = Math.sin(causticTime * p.freq + p.phase) * ambientAmp;
+      const ay = Math.cos(causticTime * p.freq * 0.8 + p.phase * 1.3) * ambientAmp;
+
+      // spring toward rest position + ambient
+      p.vx += (ax - p.dx) * tension;
+      p.vy += (ay - p.dy) * tension;
+      p.vx *= damping;
+      p.vy *= damping;
+      p.dx += p.vx * dt;
+      p.dy += p.vy * dt;
+    }
+  }
+}
+
+function drawWaterGrid() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = 'rgba(100, 170, 220, 0.04)';
+  ctx.lineWidth = 1;
+
+  // horizontal lines
+  for (let j = 0; j <= WATER_GRID_ROWS; j += 2) {
+    ctx.beginPath();
+    for (let i = 0; i <= WATER_GRID_COLS; i++) {
+      const p = waterGrid[i][j];
+      const px = p.x + p.dx;
+      const py = p.y + p.dy;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+
+  // vertical lines
+  for (let i = 0; i <= WATER_GRID_COLS; i += 2) {
+    ctx.beginPath();
+    for (let j = 0; j <= WATER_GRID_ROWS; j++) {
+      const p = waterGrid[i][j];
+      const px = p.x + p.dx;
+      const py = p.y + p.dy;
+      if (j === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+
+  // bright intersection dots at displaced points
+  for (let i = 0; i <= WATER_GRID_COLS; i += 2) {
+    for (let j = 0; j <= WATER_GRID_ROWS; j += 2) {
+      const p = waterGrid[i][j];
+      const displacement = Math.abs(p.dx) + Math.abs(p.dy);
+      if (displacement > 0.5) {
+        const a = Math.min(displacement * 0.02, 0.08);
+        ctx.fillStyle = `rgba(150, 200, 240, ${a})`;
+        ctx.beginPath();
+        ctx.arc(p.x + p.dx, p.y + p.dy, 1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+  ctx.restore();
+}
+
 // pre-generate caustic grid points for interference pattern
 let causticGrid = [];
-const CAUSTIC_GRID_SIZE = 36;
 for (let i = 0; i < CAUSTIC_GRID_SIZE; i++) {
   for (let j = 0; j < CAUSTIC_GRID_SIZE; j++) {
     causticGrid.push({
@@ -1449,7 +1746,7 @@ for (let i = 0; i < CAUSTIC_GRID_SIZE; i++) {
 
 // pre-generate god ray directions
 let godRays = [];
-for (let i = 0; i < 6; i++) {
+for (let i = 0; i < GOD_RAY_COUNT; i++) {
   godRays.push({
     x: 0.15 + Math.random() * 0.7,
     angle: 0.3 + Math.random() * 0.4,
@@ -1553,7 +1850,7 @@ function drawWater() {
   // === SPECULAR SHIMMER — brighter, more dynamic sunlight ===
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < SPECULAR_COUNT; i++) {
     const offset = i * 1.1;
     const sx = W * (0.15 + 0.7 * (0.5 + Math.sin(causticTime * 0.3 + offset) * 0.5));
     const sy = H * (0.1 + 0.35 * (0.5 + Math.cos(causticTime * 0.25 + offset * 1.5) * 0.5));
@@ -1637,34 +1934,15 @@ function getPointerPos(e) {
 
 let hasInteracted = false;
 function handlePointerDown(e) {
+  // ignore clicks on UI elements
+  if (e.target !== canvas) return;
   e.preventDefault();
   const p = getPointerPos(e);
   isDragging = true;
   lastDragX = p.x;
   lastDragY = p.y;
 
-  // if dead, check if clicking on a fish to respawn
-  if (isDead) {
-    for (const c of creatures) {
-      if (c.type === 'fish' && c.life > 0 && !c.isPlayer) {
-        const d = dist(p.x, p.y, c.x, c.y);
-        if (d < c.size * c.growthScale * 1.5) {
-          c.isPlayer = true;
-          c.name = myUserName;
-          c.decay = 0;
-          c.color = '#00f5d4';
-          myFish = c;
-          isDead = false;
-          respawnBanner.classList.remove('visible');
-          ripples.push(new Ripple(c.x, c.y, { maxRadius: 50 }));
-          sendAction({ type: 'possess', x: normX(c.x), y: normY(c.y) });
-          return;
-        }
-      }
-    }
-    return;
-  }
-
+  disturbWater(p.x, p.y, 8, 120);
   doAction(p.x, p.y);
   if (!hasInteracted) {
     hasInteracted = true;
@@ -1763,7 +2041,7 @@ const EVENT_TYPES = [
   { id: 'lily_bloom', text: 'Lily pads are blooming!', spawn: () => {
     for (let i = 0; i < 5; i++) addLily(Math.random() * W, Math.random() * H);
   }},
-  { id: 'bird_strike', text: 'BIRDS INCOMING — frogs beware!', spawn: () => {
+  { id: 'bird_strike', text: 'BIRDS INCOMING — frogs and fish beware!', spawn: () => {
     spawnBirdBarrage();
   }},
 ];
@@ -1797,25 +2075,30 @@ function spawnBirdBarrage() {
   const frogs = creatures.filter(c => c.type === 'frog' && c.life > 0.3);
   if (frogs.length === 0) return;
 
-  // shuffle frogs so we don't always target the same ones
-  const shuffled = frogs.sort(() => Math.random() - 0.5);
-  const birdCount = Math.min(frogs.length, 2 + Math.floor(Math.random() * 4)); // 2-5 birds
+  // also target fish — birds eat fish too
+  const fish = creatures.filter(c => c.type === 'fish' && c.life > 0.3 && !c.isPlayer);
+  const allTargets = [...frogs, ...fish];
+  if (allTargets.length === 0) return;
+
+  // shuffle targets so we don't always target the same ones
+  const shuffled = allTargets.sort(() => Math.random() - 0.5);
+  const birdCount = Math.min(shuffled.length * 2, 6 + Math.floor(Math.random() * 10)); // 6-15 birds, up to 2x targets
   for (let i = 0; i < birdCount; i++) {
     if (birds.length >= MAX_BIRDS) break;
     // stagger entry slightly
     setTimeout(() => {
       if (birds.length < MAX_BIRDS) {
-        birds.push(new Bird(shuffled[i]));
+        birds.push(new Bird(shuffled[i % shuffled.length]));
       }
-    }, i * 200);
+    }, i * 150);
   }
 }
 
 function maybeSpawnRandomBirds() {
-  // random bird strike: ~0.5% chance per second when there are frogs
-  // triggered outside the event system for spontaneity
+  // random bird strike: ~0.5% chance per second when there are creatures
   const frogs = creatures.filter(c => c.type === 'frog' && c.life > 0.3);
-  if (frogs.length < 2) return; // need at least 2 frogs to warrant a strike
+  const fish = creatures.filter(c => c.type === 'fish' && c.life > 0.3 && !c.isPlayer);
+  if (frogs.length + fish.length < 2) return;
   if (Math.random() < 0.008) {
     spawnBirdBarrage();
     sendAction({ type: 'birds' });
@@ -2007,7 +2290,6 @@ function describeAction(action) {
     case 'event': return 'triggered an event';
     case 'wavepool': return 'pressed the red button!';
     case 'birds': return 'summoned birds!';
-    case 'possess': return 'became a fish';
     default: return action.type;
   }
 }
@@ -2056,23 +2338,33 @@ function renderUserList(users) {
 
 // click online count to toggle user panel
 onlineCountEl.style.cursor = 'pointer';
-onlineCountEl.addEventListener('click', () => {
+onlineCountEl.addEventListener('click', (e) => {
+  e.stopPropagation();
   userPanel.classList.toggle('visible');
 });
-userPanelClose.addEventListener('click', () => {
+userPanelClose.addEventListener('click', (e) => {
+  e.stopPropagation();
   userPanel.classList.remove('visible');
 });
+
+// prevent clicks on feed and user panel from reaching canvas
+feedEl.addEventListener('mousedown', (e) => e.stopPropagation());
+feedEl.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+userPanel.addEventListener('mousedown', (e) => e.stopPropagation());
+userPanel.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
 
 // ===== PLAYER FISH (idle — no control, just lives in the pond) =====
 function spawnPlayerFish() {
   const x = W * 0.5 + (Math.random() - 0.5) * 100;
   const y = H * 0.5 + (Math.random() - 0.5) * 100;
-  const fish = new Fish(x, y, 1, true);
+  const fish = new Fish(x, y, undefined, true);
   fish.name = myUserName;
   fish.decay = 0; // player fish don't decay
   fish.color = '#00f5d4';
   creatures.push(fish);
   myFish = fish;
+  isDead = false;
+  respawnBanner.classList.remove('visible');
   ripples.push(new Ripple(x, y, { maxRadius: 50 }));
 }
 
@@ -2113,11 +2405,16 @@ let lastTime = performance.now();
 let frameCount = 0;
 
 function loop(now) {
-  const dt = Math.min((now - lastTime) / 16.67, 3);
-  lastTime = now;
-  frameCount++;
+  try {
+    const dt = Math.min((now - lastTime) / 16.67, 3);
+    lastTime = now;
+    frameCount++;
 
   drawWater();
+  if (WATER_GRID_ENABLED) {
+    updateWaterGrid(dt);
+    drawWaterGrid();
+  }
 
   // lily pads (bottom layer)
   lilies = lilies.filter(l => {
@@ -2130,6 +2427,13 @@ function loop(now) {
   ripples = ripples.filter(r => {
     const alive = r.update();
     if (alive) r.draw(ctx);
+    return alive;
+  });
+
+  // dispersing trail particles
+  trailParticles = trailParticles.filter(t => {
+    const alive = t.update(dt);
+    if (alive) t.draw(ctx);
     return alive;
   });
 
@@ -2177,6 +2481,9 @@ function loop(now) {
   if (frameCount % 4 === 0) updateRedButton();
   if (frameCount % 60 === 0) maybeSpawnRandomBirds();
 
+  } catch (e) {
+    console.error('[POND] Loop error:', e);
+  }
   requestAnimationFrame(loop);
 }
 

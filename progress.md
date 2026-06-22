@@ -1,68 +1,100 @@
-# Pond Overhaul — Progress Tracker
-
-## Plan
-File: `C:\Users\maxpu\.windsurf\plans\pond-overhaul-4ac4df.md`
+# Eternal Pond — Progress Tracker
 
 ## Project Structure
-- `c:\cursor stuff\u5edthfcv\frontend\index.html` — UI (DONE: updated to wave tool, removed ink swatches, added cooldown bar + event banner)
-- `c:\cursor stuff\u5edthfcv\frontend\style.css` — Styling (PARTIAL: needs cooldown bar, event banner, red button styles; needs ink swatch CSS removed)
-- `c:\cursor stuff\u5edthfcv\frontend\pond.js` — Game engine (NOT STARTED: needs full rewrite per plan)
-- `c:\cursor stuff\u5edthfcv\backend\src\worker.js` — Cloudflare Worker (needs wave/eat/event sync additions)
-- `c:\cursor stuff\u5edthfcv\backend\wrangler.toml` — Config (done, no changes needed)
+- `frontend/index.html` — UI layout (canvas, toolbar, cooldown bar, event banner, feed, user panel, respawn banner, status bar)
+- `frontend/style.css` — All styling (glassmorphism, animations, responsive/mobile)
+- `frontend/pond.js` — Game engine (~2510 lines): entities, rendering, input, networking, main loop
+- `backend/src/worker.js` — Cloudflare Worker + Durable Object (`PondRoom`)
+- `backend/wrangler.toml` — Cloudflare config
+- `designdoc.md` — Full design document
 
-## Overhaul Tasks (from plan)
+## Completed Work
 
-### 1. Wave System — DONE
+### Core Systems (DONE)
+- Wave system with force, foam, crest rendering
+- Water overhaul: depth gradient, subsurface glow, god rays, caustics, surface noise, specular shimmer, vignette, fog
+- Creature food chain: fish eat dragonflies, large fish eat lily pads, frogs eat dragonflies via tongue
+- Lily pad rules: growth, replacement, sinking, flower chance
+- Entity off-screen death for all entities
+- Random events: feeding frenzy, big fish, frog party, lily bloom, bird strike
+- Red button + wave pool mode
+- Backend WebSocket sync for waves, creatures, lilies, events, wave pool, birds
 
-### 2. Water Overhaul — DONE
+### AAA Graphics Pass (DONE)
+- `drawWater`: Richer depth gradient, animated god rays, denser caustics, surface parallax, specular shimmer, fog/mist
+- `Fish.draw`: Body gradient, soft shadow, forked tail, dorsal/pectoral fins, specular stripe, gill line, layered eye, legendary glow
+- `Frog.draw`: Body gradient, wet sheen, back spots, webbed feet, bulbous eyes with highlights
+- `Dragonfly.draw`: Iridescent wings (gradient, shimmer, veins), segmented body, compound eyes, soft shadow, motion trail
+- `LilyPad.draw`: Radial gradient pad, vein detail, water reflection, flower with glow and pollen
+- `Wave.draw`: Multi-ring depth, triple-layer crest, trailing rings, outer dispersion
+- `FoamParticle.draw`: Larger bubbles, soft glow, core, specular dot
+- `Ripple.draw`: Dual ring with soft glow
+- `Bird.draw`: Body gradient, feather lines, talons, shadow, eye highlight
 
-### 3. Creature Food Chain — DONE
+### Animated Water + Trails (DONE)
+- 24x16 water displacement grid with spring physics and ambient undulation (desktop only)
+- Clicks disturb water grid (120px radius, strength 8)
+- Waves disturb water grid as they expand (60px radius)
+- Fish disturb water grid as they move (30px radius, scaled by growth)
+- Bird grabs disturb water grid (80px radius)
+- TrailParticle system: fish and dragonflies emit dispersing particles that drift, spread, and fade
+- Water grid rendered as subtle grid lines + bright intersection dots
 
-### 4. Lily Pad Rules — DONE
+### Frog Lily Pad Relaxation (DONE)
+- Frogs that hop and land on a lily pad enter `relaxing` state
+- 5-8 second duration (vs 1-3s normal sitting)
+- Breathing animation: scale bob ±3%, vertical bob ±2px
+- Contented squinted eyes (curved arcs instead of open eyes)
+- No hunting while relaxing
+- Occasional tiny contentment ripples
 
-### 5. Entity Off-Screen Death — DONE
+### Bird System Overhaul (DONE)
+- 3x bird count: 6-15 per barrage (was 2-5), MAX_BIRDS 36 (was 12)
+- Slower: dive speed 3.5 (was 6), swoop speed 2.5
+- Swoop animation: scale 1.0 → 0.4 → 1.0 to simulate dropping to grab
+- Birds target fish too (not just frogs), never player fish
+- Better grab success rate
+- Birds disturb water grid on grab
 
-### 6. Random Events — DONE
+### Backend Hardening (DONE)
+- Per-user rate limiting: max 10 actions/second
+- Message size guard: max 1KB per WebSocket message
+- Full state snapshot: sends all creatures + lilies (not truncated)
 
-### 7. Red Button + Wave Pool — DONE
+### Player Fish System (DONE)
+- Player fish spawns on connect with random tier
+- Cyan color, name tag, no decay
+- Behaves as AI fish (no control)
+- Death detection: bird grab or off-screen
+- Respawn: next fish spawn becomes player (random tier, can't claim legendaries)
+- Removed click-to-claim respawn and `possess` action
+- Removed crown triangle indicator
 
-### 8. Backend Sync — DONE
+### Mobile Performance (DONE)
+- Quality scaling: mobile detection via UA + screen width
+- Reduced caustic grid (16x16), god rays (0), specular (3), surface noise (30)
+- Water displacement grid disabled on mobile
+- Foam/trail/bird caps reduced
+- DPR capped at 1.5
+- Main loop wrapped in try/catch
 
-### 9. Polish — REMAINING
+### UI Fixes (DONE)
+- Feed and user panel clicks no longer trigger canvas actions
+- `handlePointerDown` checks `e.target !== canvas`
+- stopPropagation on feed/user panel mousedown/touchstart
 
-## CSS Changes Needed
-- Remove `.color-swatch` styles (lines 54-71)
-- Remove `.tool-group + .tool-group` border (no longer needed, single group)
-- Remove `.color-swatch` from mobile media query
-- Add `#cooldown-bar` / `#cooldown-fill` styles (thin bar above toolbar, fills up as cooldown recovers)
-- Add `#event-banner` styles (top center banner, slides in/out)
-- Add `#red-button` styles (pulsing red circle, positioned absolutely)
+### Visual Fixes (DONE)
+- Creatures stay fully opaque until life < 0.3, then fade out (no more random partial transparency)
+- Event timers use real-time instead of frame counting
 
-## JS Rewrite Needed
-Full rewrite of `pond.js`. Key changes from current version:
-- Remove InkParticle class entirely
-- Remove ink-related config, entity managers, input handling
-- Add WaveEntity class with force/foam/crest
-- Overhaul drawWater() with multi-layer rendering
-- Rework Fish class: add tier system, eating AI, growth
-- Rework Frog class: add legs, tongue, lily pad sitting, growth from eating
-- Rework Dragonfly class: rename to fly conceptually, prey behavior
-- Add lily pad placement cooldown + replacement logic
-- Add off-screen death to all entity update() methods
-- Add event system + banner
-- Add red button + wave pool mode
-- Update WebSocket sync for waves/eats/events
-- Update toolbar handling (no color swatches, wave is default tool)
-- Update cooldown UI in main loop
+## Deployment
+- Frontend: `npx wrangler pages deploy frontend --project-name=shared-pond --commit-dirty=true`
+- Backend: `npx wrangler deploy` (from `backend/`)
+- Frontend URL: `https://<hash>.shared-pond.pages.dev`
+- Backend URL: `https://shared-pond.maxpug17.workers.dev`
+- WebSocket: `wss://ws.eternalpond.com/ws`
 
-## Current State of Files
-- `index.html`: DONE — wave tool, cooldown bar, event banner, wave pool banner
-- `style.css`: DONE — all new styles added, ink swatch styles removed
-- `pond.js`: DONE — full rewrite with all systems
-- `backend/src/worker.js`: DONE — updated for wave/event/wavepool sync, ink removed
-
-## Next Steps
-1. Visual testing in browser (in progress)
-2. Balance tuning if needed
-3. Deploy backend to Cloudflare
-4. Package frontend for itch.io
+## Known State
+- All systems functional and deployed
+- Mobile performance optimized
+- No known bugs

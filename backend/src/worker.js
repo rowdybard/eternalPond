@@ -120,7 +120,6 @@ export class PondRoom {
       case 'event':
       case 'wavepool':
       case 'birds':
-      case 'possess':
         break;
     }
 
