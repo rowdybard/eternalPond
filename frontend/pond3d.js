@@ -932,7 +932,7 @@ class Wave3D {
     this.splashSpread = opts.splashSpread || (Math.PI * 0.4);
     this.id = Math.random();
     this.damagedLilies = new Set();
-    this.disturbAccum = 1.2; // fire on first update
+    this.disturbAccum = 0;
   }
 
   update(dt) {
@@ -962,10 +962,6 @@ class Wave3D {
     }
 
     this.disturbAccum += dt;
-    if (this.disturbAccum > 0.3) {
-      this.disturbAccum = 0;
-      disturbWater(this.x, this.y, waveStrength * 5, 60);
-    }
     return this.life > 0;
   }
 
@@ -1716,6 +1712,7 @@ const respawnBanner = document.getElementById('respawn-banner');
 function addWave(x, y, opts) {
   if (waves.length >= MAX_WAVES) waves.shift().destroy();
   waves.push(new Wave3D(x, y, opts));
+  disturbWater(x, y, 8, 120);
 }
 
 function addRipple(x, y, opts) {
