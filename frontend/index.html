@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="A quiet, persistent shared pond. Spawn a fish, stir the water, and leave a ripple in a world that keeps existing after you go.">
   <title>eternal pond</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,9 +32,9 @@
     <button class="tool-btn active" data-tool="wave" data-tip="Wave"><span class="tool-ico">🌊</span></button>
     <button class="tool-btn" data-tool="fish" data-tip="Fish"><span class="tool-ico">🐟</span></button>
     <button class="tool-btn" data-tool="frog" data-tip="Frog"><span class="tool-ico">🐸</span></button>
-    <button class="tool-btn" data-tool="dragonfly" data-tip="Dragonfly"><span class="tool-ico">�</span></button>
+    <button class="tool-btn" data-tool="dragonfly" data-tip="Dragonfly"><span class="tool-ico">🪰</span></button>
     <button class="tool-btn" data-tool="lily" data-tip="Lily Pad"><span class="tool-ico">🌿</span></button>
-    <button class="tool-btn" data-tool="plankton" data-tip="Plankton Pack"><span class="tool-ico">�</span></button>
+    <button class="tool-btn" data-tool="plankton" data-tip="Plankton Pack"><span class="tool-ico">✨</span></button>
   </div>
 
   <!-- Cooldown bar -->
@@ -42,17 +43,24 @@
   <!-- Event banner -->
   <div id="event-banner"></div>
 
-  <!-- Wave pool banner -->
-  <div id="wave-pool-banner">⚡ WAVE POOL ⚡</div>
-
   <!-- Toast feed -->
   <div id="toast-container"></div>
+
+  <!-- Welcome card: one quiet confirmation that your fish entered the shared pond -->
+  <div id="welcome-card">
+    <div class="welcome-glyph">🐟</div>
+    <div class="welcome-text">
+      <div class="welcome-title">your fish has joined the pond</div>
+      <div class="welcome-sub">it stays here, swimming, even after you leave</div>
+    </div>
+  </div>
 
   <!-- Respawn modal -->
   <div id="respawn-banner">
     <div class="respawn-card">
       <div class="respawn-glyph">🐟</div>
       <div class="respawn-title">your fish has faded</div>
+      <div id="respawn-lifetime"></div>
       <div class="respawn-subtitle">the pond awaits a new ripple</div>
       <button id="respawn-btn">spawn a fish</button>
     </div>
@@ -79,8 +87,10 @@
   <div id="status-bar">
     <span id="online-count">connecting…</span>
     <span id="session-timer">00:00</span>
-    <span id="fish-lives">Fish Lives Lived: …</span>
-    <span id="hint">click &amp; drag the water · scroll to zoom</span>
+    <span id="fish-age"></span>
+    <span id="fish-lives">… fish lives lived</span>
+    <button id="mute-btn" aria-label="toggle sound" title="toggle sound">🔊</button>
+    <span id="hint">tap the water · drag to look around</span>
   </div>
 
   <!-- Three.js r128 (pinned, version-matched core + examples) -->

@@ -217,7 +217,7 @@ html, body {
 /* ===================== COOLDOWN BAR ===================== */
 #cooldown-bar {
   position: fixed;
-  bottom: calc(78px + var(--safe-b));
+  bottom: calc(88px + var(--safe-b));
   left: 50%;
   transform: translateX(-50%);
   width: 240px;
@@ -282,11 +282,40 @@ html, body {
   content: "● ";
   animation: pulse 2s ease-in-out infinite;
 }
+#online-count.state-reconnecting { color: #f0c674; }
+#online-count.state-offline { color: var(--txt-faint); }
+#online-count.flash { animation: presenceFlash 0.9s ease; }
+@keyframes presenceFlash {
+  0% { color: var(--teal); text-shadow: 0 0 14px rgba(0, 245, 212, 0.8); }
+  100% { color: var(--teal-soft); text-shadow: none; }
+}
+#online-count.flash-gold { animation: goldFlash 1.4s ease; }
+@keyframes goldFlash {
+  0% { color: var(--gold); text-shadow: 0 0 16px rgba(240, 198, 116, 0.9); }
+  100% { color: var(--teal-soft); text-shadow: none; }
+}
 #session-timer {
   font-variant-numeric: tabular-nums;
   color: var(--txt-faint);
   letter-spacing: 1px;
 }
+#fish-age {
+  font-variant-numeric: tabular-nums;
+  color: var(--txt-dim);
+  letter-spacing: 0.5px;
+}
+#fish-age:empty { display: none; }
+#mute-btn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.2s, transform 0.15s;
+  line-height: 1;
+}
+#mute-btn:hover { opacity: 1; transform: scale(1.15); }
 #fish-lives {
   font-variant-numeric: tabular-nums;
   color: var(--teal-soft);
@@ -327,29 +356,6 @@ html, body {
   color: var(--teal);
 }
 #event-banner.legendary .event-timer { color: var(--gold); }
-
-/* ===================== WAVE POOL BANNER ===================== */
-#wave-pool-banner {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  font-size: clamp(34px, 7vw, 54px);
-  font-weight: 800;
-  color: rgba(255, 120, 120, 0.92);
-  text-shadow: 0 0 36px rgba(255, 50, 50, 0.7);
-  letter-spacing: 5px;
-  z-index: 13;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.5s;
-}
-#wave-pool-banner.visible { opacity: 1; animation: wavePoolShake 0.28s ease-in-out infinite; }
-@keyframes wavePoolShake {
-  0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-  25% { transform: translate(-52%, -50%) rotate(-0.5deg); }
-  75% { transform: translate(-48%, -50%) rotate(0.5deg); }
-}
 
 /* ===================== TOASTS ===================== */
 #toast-container {
@@ -394,6 +400,50 @@ html, body {
   to { opacity: 1; transform: translateX(0) scale(1); }
 }
 
+/* ===================== WELCOME CARD ===================== */
+#welcome-card {
+  position: fixed;
+  bottom: calc(100px + var(--safe-b));
+  left: 50%;
+  transform: translateX(-50%) translateY(16px);
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 22px;
+  background: var(--glass-strong);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid rgba(0, 245, 212, 0.35);
+  border-radius: 16px;
+  box-shadow: 0 0 30px rgba(0, 245, 212, 0.18), var(--shadow);
+  z-index: 15;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#welcome-card.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+.welcome-glyph {
+  font-size: 26px;
+  filter: drop-shadow(0 0 10px rgba(0, 245, 212, 0.6));
+  animation: welcomeBob 2.4s ease-in-out infinite;
+}
+@keyframes welcomeBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.welcome-title {
+  font-family: 'Fraunces', serif;
+  font-size: 16px;
+  font-weight: 600;
+  color: #eaf6ff;
+}
+.welcome-sub {
+  font-size: 11.5px;
+  color: var(--txt-dim);
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+
 /* ===================== RESPAWN MODAL ===================== */
 #respawn-banner {
   position: fixed;
@@ -427,6 +477,13 @@ html, body {
 #respawn-banner.visible .respawn-card { transform: scale(1); }
 .respawn-glyph { font-size: 40px; opacity: 0.5; filter: grayscale(0.3); }
 .respawn-title { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 600; color: #eaf6ff; }
+#respawn-lifetime {
+  font-size: 13px;
+  color: var(--teal-soft);
+  letter-spacing: 0.4px;
+  font-variant-numeric: tabular-nums;
+}
+#respawn-lifetime:empty { display: none; }
 .respawn-subtitle { font-size: 13px; color: var(--txt-dim); margin-bottom: 10px; }
 #respawn-btn {
   padding: 11px 28px;
@@ -552,6 +609,7 @@ html, body {
 /* achievements */
 #panel-achievements { display: flex; flex-wrap: wrap; gap: 6px; }
 .achv-pill {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -564,6 +622,22 @@ html, body {
   background: rgba(255, 255, 255, 0.03);
   color: var(--txt-faint);
   transition: all 0.2s;
+  overflow: hidden;
+}
+.achv-pill .achv-count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+.achv-pill .achv-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(0, 245, 212, 0.45);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+  pointer-events: none;
 }
 .achv-pill.unlocked {
   border-color: rgba(240, 198, 116, 0.45);
@@ -592,26 +666,6 @@ html, body {
 .user-name { font-size: 13px; font-weight: 600; color: var(--txt); margin-bottom: 2px; }
 .user-stats { font-size: 11px; color: var(--txt-faint); display: flex; gap: 7px; flex-wrap: wrap; }
 .user-stats span { white-space: nowrap; }
-
-/* ===================== RED BUTTON ===================== */
-#red-button {
-  position: fixed;
-  width: 52px; height: 52px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #ff5a5a, #c00000);
-  border: 3px solid rgba(255, 255, 255, 0.35);
-  box-shadow: 0 0 22px rgba(255, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45);
-  cursor: pointer;
-  z-index: 14;
-  animation: redPulse 0.85s ease-in-out infinite;
-  transition: transform 0.15s;
-}
-#red-button:hover { transform: scale(1.14); }
-#red-button:active { transform: scale(0.9); }
-@keyframes redPulse {
-  0%, 100% { box-shadow: 0 0 22px rgba(255, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45); }
-  50% { box-shadow: 0 0 40px rgba(255, 0, 0, 0.85), 0 4px 14px rgba(0, 0, 0, 0.45); }
-}
 
 /* ===================== RIDE-ALONG CAMERA HINT ===================== */
 #cam-hint {
@@ -644,17 +698,24 @@ html, body {
 /* ===================== MOBILE ===================== */
 @media (max-width: 600px) {
   #brand { font-size: 16px; top: calc(12px + var(--safe-t)); left: 14px; }
-  #status-bar { font-size: 10px; gap: 12px; top: calc(12px + var(--safe-t)); }
+  #status-bar { font-size: 10px; gap: 10px; top: calc(12px + var(--safe-t)); max-width: 94vw; flex-wrap: wrap; justify-content: center; }
   #hint { display: none; }
   #cam-hint { display: none; }
   #toolbar { gap: 6px; padding: 6px; border-radius: 16px; }
   .tool-btn { width: 46px; height: 46px; font-size: 22px; }
   .tool-btn::before { display: none; }
-  #toast-container { max-width: 220px; left: 12px; bottom: calc(88px + var(--safe-b)); }
+  #toast-container { max-width: 220px; left: 12px; bottom: calc(96px + var(--safe-b)); }
   .toast { font-size: 11.5px; padding: 8px 11px; }
-  #cooldown-bar { width: 200px; }
+  #cooldown-bar { width: 200px; bottom: calc(86px + var(--safe-b)); }
   #event-banner { font-size: 12px; padding: 9px 16px; white-space: normal; max-width: 86vw; text-align: center; }
   #user-panel { width: calc(100vw - 24px); }
+  #welcome-card { padding: 11px 16px; gap: 10px; max-width: 88vw; bottom: calc(92px + var(--safe-b)); }
+  .welcome-title { font-size: 14px; }
+  .welcome-sub { font-size: 10.5px; }
+}
+
+@media (max-width: 420px) {
+  #session-timer { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

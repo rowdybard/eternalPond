@@ -141,7 +141,6 @@ export class PondRoom {
         break;
       case 'plankton':
       case 'event':
-      case 'wavepool':
       case 'birds':
         break;
     }

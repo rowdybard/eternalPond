@@ -7,6 +7,35 @@
    engine falls back to high-quality procedural meshes.
 =================================================================== */
 
+// ===== BOOT GUARD =====
+// If the Three.js CDN failed to load there is no pond to render — swap the
+// loading screen into a gentle failure state instead of hanging forever.
+if (typeof THREE === 'undefined') {
+  const st = document.querySelector('#loading-screen .loading-status');
+  const bar = document.querySelector('#loading-screen .loading-bar');
+  if (st) st.textContent = 'the pond could not wake — check your connection and refresh';
+  if (bar) bar.style.display = 'none';
+  throw new Error('three.js failed to load');
+}
+
+// ===== LOADING SCREEN =====
+// Cycle quiet status phrases while assets stream in, so a slow network reads
+// as intentional rather than broken. Cleared by hideLoadingScreen().
+const LOADING_PHRASES = ['summoning the water…', 'growing the reeds…', 'waking the fish…', 'raising the dome…', 'joining the shared pond…'];
+let loadingPhraseIdx = 0;
+const loadingPhraseTimer = setInterval(() => {
+  const st = document.querySelector('#loading-screen .loading-status');
+  if (!st) return;
+  loadingPhraseIdx = (loadingPhraseIdx + 1) % LOADING_PHRASES.length;
+  st.textContent = LOADING_PHRASES[loadingPhraseIdx];
+}, 1100);
+
+function hideLoadingScreen() {
+  clearInterval(loadingPhraseTimer);
+  const ls = document.getElementById('loading-screen');
+  if (ls) ls.classList.add('hidden');
+}
+
 // ===== CONFIG =====
 const WS_URL = 'wss://shared-pond.maxpug17.workers.dev/ws';
 const WS_URL_FALLBACK = 'wss://ws.eternalpond.com/ws';
@@ -20,8 +49,8 @@ const MAX_RIPPLES = 120;
 const MAX_LILIES = 40;
 const MAX_WAVES = 30;
 const MAX_BIRDS = LOW_QUALITY ? 18 : 36;
-const WAVE_COOLDOWN = 1500;
-const WAVE_COOLUP = 500;
+const WAVE_COOLDOWN = 800;
+const WAVE_COOLUP = 200;
 const LILY_PLACE_COOLDOWN = 2000;
 const OFFSCREEN_MARGIN = 80;
 
@@ -126,12 +155,12 @@ function toWorldZ(y) { return (y - H / 2) * POS_SCALE; }
 
 // ===== THREE.JS CORE =====
 const canvas = document.getElementById('pond3d');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: !LOW_QUALITY, alpha: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.0 : 1.5));
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.0 : 1.25));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.ACESFilmicToneMapping; // filmic rolloff keeps bright celestials from clipping
-renderer.toneMappingExposure = 1.2;                 // modest lift to offset ACES mid-tone compression
+renderer.toneMappingExposure = 1.0;                 // neutral — a lift here compounds water glare
 
 const scene = new THREE.Scene();
 const FOG_COLOR = 0x0a0a18;
@@ -217,7 +246,7 @@ canvas.addEventListener('pointerdown', bumpInteract);
 canvas.addEventListener('wheel', bumpInteract, { passive: true });
 
 // ===== LIGHTING ===== (tuned for space dome interior)
-const sun = new THREE.DirectionalLight(0xfff1d6, 1.1);
+const sun = new THREE.DirectionalLight(0xfff1d6, 0.85);
 sun.position.set(58, 130, 46);
 scene.add(sun);
 const sunDir = new THREE.Vector3().copy(sun.position).normalize();
@@ -228,7 +257,7 @@ const ambient = new THREE.AmbientLight(0x1a3050, 0.5);
 scene.add(ambient);
 
 // faint rim/back light for separation
-const rim = new THREE.DirectionalLight(0x4fd9ff, 0.4);
+const rim = new THREE.DirectionalLight(0x4fd9ff, 0.25);
 rim.position.set(-70, 40, -90);
 scene.add(rim);
 
@@ -236,7 +265,7 @@ scene.add(rim);
 // Deep space with stars, nebula clouds, and a distant planet.
 // Procedurally generated in the fragment shader — no textures needed.
 (function buildSpaceSky() {
-  const skyGeo = new THREE.SphereGeometry(3000, 48, 32);
+  const skyGeo = new THREE.SphereGeometry(3000, 32, 20);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -267,7 +296,7 @@ scene.add(rim);
       }
       float fbm(vec3 p) {
         float v = 0.0, a = 0.5;
-        for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.0; a *= 0.5; }
+        for (int i = 0; i < 2; i++) { v += a * noise(p); p *= 2.0; a *= 0.5; }
         return v;
       }
       void main() {
@@ -287,8 +316,8 @@ scene.add(rim);
           pcol += vec3(0.2, 0.1, 0.05) * smoothstep(0.5, 1.0, pp);
           col = mix(col, pcol, smoothstep(0.0, 0.3, pp) * (1.0 - smoothstep(0.7, 1.0, pp) * 0.5));
         }
-        // star field — multi-layer
-        for (int layer = 0; layer < 3; layer++) {
+        // star field — 2 layers
+        for (int layer = 0; layer < 2; layer++) {
           float scale = 80.0 + float(layer) * 60.0;
           vec3 sp = dir * scale;
           vec3 si = floor(sp);
@@ -321,18 +350,17 @@ const waterUniforms = {
   uShoreR: { value: R_SHORE },
   uRipples: { value: Array.from({ length: MAX_WATER_RIPPLES }, () => new THREE.Vector4(0, 0, -999, 0)) },
   uSunDir: { value: sunDir.clone() },
-  uDeep: { value: new THREE.Color(0x0d4258) },
-  uShallow: { value: new THREE.Color(0x2a9fb6) },
-  uFoam: { value: new THREE.Color(0xcdf2ff) },
+  uDeep: { value: new THREE.Color(0x0a2a38) },
+  uShallow: { value: new THREE.Color(0x1a5560) },
+  uFoam: { value: new THREE.Color(0xc0d8d8) },
   uFog: { value: new THREE.Color(FOG_COLOR) },
   uFogDensity: { value: scene.fog.density },
-  uWavePool: { value: 0 },
 };
 
 // Circular pond disc (RingGeometry gives plenty of radial rings for the
 // vertex-displaced ripples, and a circular edge melts into the forest fog
 // instead of showing a hard square boundary).
-const waterGeo = new THREE.RingGeometry(0.4, R_WATER, LOW_QUALITY ? 72 : 140, LOW_QUALITY ? 26 : 60);
+const waterGeo = new THREE.RingGeometry(0.4, R_WATER, LOW_QUALITY ? 64 : 96, LOW_QUALITY ? 20 : 40);
 waterGeo.rotateX(-Math.PI / 2);
 
 const waterMat = new THREE.ShaderMaterial({
@@ -351,10 +379,10 @@ const waterMat = new THREE.ShaderMaterial({
 
     float ambient(vec2 p, float t) {
       float h = 0.0;
-      h += sin(p.x * 0.060 + t * 1.10) * 0.34;
-      h += sin(p.y * 0.052 - t * 0.92) * 0.34;
-      h += sin((p.x + p.y) * 0.044 + t * 0.70) * 0.20;
-      h += cos(p.x * 0.115 - p.y * 0.093 + t * 1.45) * 0.12;
+      h += sin(p.x * 0.060 + t * 1.10) * 0.06;
+      h += sin(p.y * 0.052 - t * 0.92) * 0.06;
+      h += sin((p.x + p.y) * 0.044 + t * 0.70) * 0.04;
+      h += cos(p.x * 0.115 - p.y * 0.093 + t * 1.45) * 0.02;
       return h;
     }
     float ripples(vec2 p, float t) {
@@ -368,7 +396,7 @@ const waterMat = new THREE.ShaderMaterial({
         float radius = age * 26.0;
         float band = d - radius;
         float env = exp(-age * 0.9) * exp(-abs(band) * 0.22) * exp(-d * 0.012);
-        h += sin(band * 0.9) * env * r.w * 2.6;
+        h += sin(band * 0.9) * env * r.w * 3.2;
       }
       return h;
     }
@@ -383,11 +411,11 @@ const waterMat = new THREE.ShaderMaterial({
       vec2 p = wp.xz;
       float e = elevation(p, uTime);
       wp.y += e;
-      // normal via finite differences
+      // normal via finite differences — 2 taps instead of 4 (central difference)
       float d = 1.6;
-      float ex = elevation(p + vec2(d, 0.0), uTime) - elevation(p - vec2(d, 0.0), uTime);
-      float ez = elevation(p + vec2(0.0, d), uTime) - elevation(p - vec2(0.0, d), uTime);
-      vNormal = normalize(vec3(-ex, 2.0 * d, -ez));
+      float eR = elevation(p + vec2(d, 0.0), uTime);
+      float eU = elevation(p + vec2(0.0, d), uTime);
+      vNormal = normalize(vec3(e - eR, d, e - eU));
       vWorld = wp.xyz;
       vCrest = clamp(e * 0.5 + 0.5, 0.0, 1.0);
       gl_Position = projectionMatrix * viewMatrix * wp;
@@ -397,24 +425,23 @@ const waterMat = new THREE.ShaderMaterial({
     precision highp float;
     uniform vec3 uSunDir; uniform vec3 uDeep; uniform vec3 uShallow;
     uniform vec3 uFoam; uniform vec3 uFog; uniform float uFogDensity;
-    uniform float uWavePool; uniform float uShoreR;
+    uniform float uShoreR;
     varying vec3 vWorld; varying vec3 vNormal; varying float vCrest;
 
     void main() {
       vec3 N = normalize(vNormal);
       vec3 V = normalize(cameraPosition - vWorld);
-      float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+      float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);
 
-      vec3 base = mix(uDeep, uShallow, clamp(vCrest * 0.9 + fres * 0.5, 0.0, 1.0));
-      // sun specular
+      vec3 base = mix(uDeep, uShallow, clamp(vCrest * 0.9 + fres * 0.3, 0.0, 1.0));
+      // sun specular — tight, restrained glint (a broad bright wash hid the fish)
       vec3 Hh = normalize(uSunDir + V);
-      float spec = pow(max(dot(N, Hh), 0.0), 90.0);
+      float spec = pow(max(dot(N, Hh), 0.0), 160.0);
       // diffuse sky tint
       float diff = max(dot(N, vec3(0.0, 1.0, 0.0)), 0.0);
-      vec3 col = base + uShallow * diff * 0.18;
-      col += vec3(1.0, 0.97, 0.9) * spec * 1.4;
-      col += uFoam * smoothstep(0.78, 1.0, vCrest) * 0.5;     // crest foam
-      col = mix(col, vec3(0.45, 0.06, 0.06), uWavePool * 0.28); // wave-pool tint
+      vec3 col = base + uShallow * diff * 0.08;
+      col += vec3(1.0, 0.97, 0.9) * spec * 0.35;
+      col += uFoam * smoothstep(0.72, 0.95, vCrest) * 0.5;     // crest foam
 
       // distance fog (manual, since this material has fog disabled)
       float dcam = length(cameraPosition - vWorld);
@@ -425,7 +452,7 @@ const waterMat = new THREE.ShaderMaterial({
       // and fade transparency to zero at the shore so the waterline melts
       // into the wet-sand band instead of forming a hard edge.
       float shore = smoothstep(uShoreR, uShoreR - 24.0, length(vWorld.xz));
-      float alpha = clamp(0.44 + fres * 0.34, 0.0, 0.9) * shore;
+      float alpha = clamp(0.52 + fres * 0.22, 0.0, 0.9) * shore;
       gl_FragColor = vec4(col, alpha);
     }
   `,
@@ -441,7 +468,7 @@ scene.add(water);
 function disturbWater(x, y, strength, radius) {
   if ((strength || 1) < 1.5) return;
   const wx = toWorldX(x), wz = toWorldZ(y);
-  const s = clamp((strength || 1) * 0.1, 0.18, 1.4);
+  const s = clamp((strength || 1) * 0.1, 0.18, 1.8);
   const slot = waterRippleHead % MAX_WATER_RIPPLES;
   waterRippleHead++;
   const v = waterUniforms.uRipples.value[slot];
@@ -488,7 +515,6 @@ const ASSETS = {
   sun: 'assets/ps1_style_low_poly_sun.glb',
   earth: 'assets/ps1_style_low_poly_earth.glb',
   moon: 'assets/ps1_style_low_poly_moon.glb',
-  penguin: 'assets/low_poly_penguin.glb',
 };
 const assetCache = {};
 const gltfLoader = (typeof THREE.GLTFLoader === 'function') ? new THREE.GLTFLoader() : null;
@@ -587,6 +613,89 @@ function buildFish(color, tier) {
   }
 
   g.userData = { tail: tailPivot, body, materials: [bodyMat, tail.material, dorsal.material], glow };
+  return g;
+}
+
+// ---------- PROCEDURAL PENGUIN (legendary fish) ----------
+// Swimming pose: torpedo body lying belly-down with the head along +X (the
+// axis sync3D yaws toward the swim direction), white tummy, swept-back
+// flippers, and paddling feet on a rear pivot that wags like a fish tail.
+function buildPenguin(color) {
+  const g = new THREE.Group();
+  const col = new THREE.Color(color);
+  const coat = stdMat(0x1c2430, { roughness: 0.5, metalness: 0.05, emissive: col.clone().multiplyScalar(0.18).getHex() });
+  const tummyMat = stdMat(0xe8ecf0, { roughness: 0.55 });
+  const orange = stdMat(0xe8933a, { roughness: 0.5 });
+
+  const body = new THREE.Mesh(geo('pengBody', () => new THREE.SphereGeometry(1, 18, 14)), coat);
+  body.scale.set(1.3, 0.62, 0.55); g.add(body);
+
+  // white belly
+  const tummy = new THREE.Mesh(geo('pengBody', () => new THREE.SphereGeometry(1, 18, 14)), tummyMat);
+  tummy.scale.set(1.16, 0.5, 0.44); tummy.position.y = -0.16; g.add(tummy);
+
+  // head with white cheek patches
+  const head = new THREE.Mesh(geo('pengHead', () => new THREE.SphereGeometry(0.46, 14, 12)), coat);
+  head.position.set(1.05, 0.22, 0); g.add(head);
+  for (const s of [-1, 1]) {
+    const patch = new THREE.Mesh(geo('pengCheek', () => new THREE.SphereGeometry(0.18, 10, 8)), tummyMat);
+    patch.scale.set(0.9, 1.1, 0.7);
+    patch.position.set(1.18, 0.14, s * 0.24); g.add(patch);
+  }
+
+  // beak — wide, flat penguin beak from a squashed sphere
+  const beak = new THREE.Mesh(geo('pengBeak', () => new THREE.SphereGeometry(0.22, 10, 8)), orange);
+  beak.scale.set(1.15, 0.42, 0.72);
+  beak.position.set(1.48, 0.16, 0); g.add(beak);
+  // beak ridge / tip for definition
+  const beakTip = new THREE.Mesh(geo('pengBeakTip', () => new THREE.SphereGeometry(0.14, 8, 6)), orange);
+  beakTip.scale.set(0.9, 0.38, 0.6);
+  beakTip.position.set(1.62, 0.15, 0); g.add(beakTip);
+
+  // big googly silly eyes — white sclera bulging out + black pupil
+  const eyeWhite = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.15 });
+  const eyeBlack = new THREE.MeshStandardMaterial({ color: 0x05080c, roughness: 0.1 });
+  const eyeShine = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  for (const s of [-1, 1]) {
+    // sclera
+    const sclera = new THREE.Mesh(geo('pengEyeW', () => new THREE.SphereGeometry(0.17, 14, 12)), eyeWhite);
+    sclera.position.set(1.28, 0.42, s * 0.22); g.add(sclera);
+    // pupil
+    const pupil = new THREE.Mesh(geo('pengEyeB', () => new THREE.SphereGeometry(0.09, 12, 10)), eyeBlack);
+    pupil.position.set(1.40, 0.42, s * 0.22); g.add(pupil);
+    // glint
+    const glint = new THREE.Mesh(geo('pengEyeG', () => new THREE.SphereGeometry(0.03, 8, 6)), eyeShine);
+    glint.position.set(1.46, 0.46, s * 0.20); g.add(glint);
+  }
+
+  // flippers, swept back along the body
+  for (const s of [-1, 1]) {
+    const fl = new THREE.Mesh(geo('pengFlipper', () => new THREE.SphereGeometry(0.5, 12, 10)), coat);
+    fl.scale.set(0.9, 0.16, 0.34);
+    fl.position.set(0.1, 0.05, s * 0.6);
+    fl.rotation.y = s * 0.55;
+    fl.rotation.x = s * 0.25;
+    g.add(fl);
+  }
+
+  // paddling feet + stubby tail on a rear pivot — sync3D wags it like a tail
+  const tailPivot = new THREE.Group(); tailPivot.position.set(-1.1, -0.12, 0);
+  for (const s of [-1, 1]) {
+    const foot = new THREE.Mesh(geo('pengFoot', () => new THREE.SphereGeometry(0.16, 8, 6)), orange);
+    foot.scale.set(1.7, 0.35, 0.9);
+    foot.position.set(-0.25, 0, s * 0.2);
+    tailPivot.add(foot);
+  }
+  const tail = new THREE.Mesh(geo('pengTail', () => new THREE.ConeGeometry(0.2, 0.5, 6)), coat);
+  tail.rotation.z = Math.PI / 2; tail.position.set(-0.3, 0.1, 0);
+  tailPivot.add(tail);
+  g.add(tailPivot);
+
+  // legendary glow — same treatment as a tier-3 procedural fish
+  const glow = new THREE.PointLight(col.getHex(), 0.9, 14, 2);
+  g.add(glow);
+
+  g.userData = { tail: tailPivot, body, materials: [coat, tummyMat, orange, eyeWhite, eyeBlack], glow };
   return g;
 }
 
@@ -823,19 +932,7 @@ class Wave3D {
     this.splashSpread = opts.splashSpread || (Math.PI * 0.4);
     this.id = Math.random();
     this.damagedLilies = new Set();
-    this.disturbAccum = 0;
-
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0xbfeeff, transparent: true, opacity: 0.6,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    this.mesh = new THREE.Mesh(
-      geo('waveRing', () => new THREE.RingGeometry(0.86, 1.0, 56).rotateX(-Math.PI / 2)),
-      ringMat
-    );
-    this.mesh.position.set(toWorldX(x), 0.25, toWorldZ(y));
-    this.mesh.renderOrder = 3;
-    scene.add(this.mesh);
+    this.disturbAccum = 1.2; // fire on first update
   }
 
   update(dt) {
@@ -849,8 +946,8 @@ class Wave3D {
         const angle = Math.atan2(c.y - this.y, c.x - this.x);
         const inSplash = Math.abs(((angle - this.splashAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI) < this.splashSpread;
         const power = this.force * waveStrength * (inSplash ? 2.5 : 1.0);
-        c.vx = (c.vx || 0) + Math.cos(angle) * power * 0.15;
-        c.vy = (c.vy || 0) + Math.sin(angle) * power * 0.15;
+        c.vx = (c.vx || 0) + Math.cos(angle) * power * 0.04;
+        c.vy = (c.vy || 0) + Math.sin(angle) * power * 0.04;
       }
     }
 
@@ -865,7 +962,7 @@ class Wave3D {
     }
 
     this.disturbAccum += dt;
-    if (this.disturbAccum > 1.2) {
+    if (this.disturbAccum > 0.3) {
       this.disturbAccum = 0;
       disturbWater(this.x + Math.cos(this.splashAngle) * this.radius,
                    this.y + Math.sin(this.splashAngle) * this.radius, waveStrength * 4, 60);
@@ -873,13 +970,9 @@ class Wave3D {
     return this.life > 0;
   }
 
-  sync3D() {
-    const r = Math.max(0.1, this.radius * POS_SCALE);
-    this.mesh.scale.set(r, 1, r);
-    this.mesh.material.opacity = this.life * 0.7;
-  }
+  sync3D() {}
 
-  destroy() { scene.remove(this.mesh); this.mesh.material.dispose(); }
+  destroy() {}
 }
 
 // ===== RIPPLE (ambient) =====
@@ -1028,9 +1121,8 @@ class Fish3D {
     this.x = _sp.x; this.y = _sp.y;
 
     const isLegendary = this.tier === 3;
-    const glb = isLegendary && assetCache.penguin ? instantiateGLB('penguin') :
-                !isLegendary && assetCache.fish ? instantiateGLB('fish') : null;
-    this.model = glb ? glb.root : buildFish(this.color, this.tier);
+    const glb = !isLegendary && assetCache.fish ? instantiateGLB('fish') : null;
+    this.model = glb ? glb.root : (isLegendary ? buildPenguin(this.color) : buildFish(this.color, this.tier));
     this.mixer = glb ? glb.mixer : null;
     this.mesh = unitWrap(this.model);
     this.mesh.rotation.y = -this.angle;
@@ -1186,6 +1278,7 @@ class Fish3D {
   }
 
   destroy() {
+    if (this.carried) return; // mesh is now parented to the bird — bird cleans it up
     scene.remove(this.mesh);
     if (this.nameSprite) { scene.remove(this.nameSprite); this.nameSprite.material.map.dispose(); this.nameSprite.material.dispose(); }
   }
@@ -1353,7 +1446,10 @@ class Frog3D {
     if (this.mixer) this.mixer.update(0.016);
   }
 
-  destroy() { scene.remove(this.mesh); scene.remove(this.tongueTip); scene.remove(this.shadow); }
+  destroy() {
+    if (this.carried) return; // mesh is parented to the bird — bird cleans it up
+    scene.remove(this.mesh); scene.remove(this.tongueTip); scene.remove(this.shadow);
+  }
 }
 
 // ===== DRAGONFLY =====
@@ -1553,7 +1649,20 @@ class Bird3D {
         this.angle = Math.atan2(this.vy, this.vx);
         if (this.swoopPhase >= 1) {
           if (d < this.size * 2) {
-            this.state = 'escaping'; this.grabbedCreature = true; this.target.life = 0; this.swoopScale = 1; this.exitTimer = 0;
+            this.state = 'escaping'; this.grabbedCreature = true; this.swoopScale = 1; this.exitTimer = 0;
+            if (this.target && this.target.mesh) {
+              this.caughtMesh = this.target.mesh;
+              this.caughtNameSprite = this.target.nameSprite || null;
+              this.target.carried = true; // prevent fish.destroy() from removing mesh
+              this.target.life = 0; // remove from AI updates
+              this.caughtMesh.position.set(0.8, 0, 0); // in front of bird = beak area
+              this.caughtMesh.rotation.set(0, 0, 0);
+              this.caughtMesh.scale.setScalar(0.6);
+              this.mesh.add(this.caughtMesh);
+              if (this.caughtNameSprite) this.caughtNameSprite.visible = false;
+            } else {
+              this.target.life = 0;
+            }
             ripples.push(new Ripple3D(this.target.x, this.target.y, { maxRadius: 60 }));
             disturbWater(this.target.x, this.target.y, 6, 80);
           } else { this.state = 'escaping'; this.exitTimer = 0; this.swoopScale = 1; }
@@ -1593,7 +1702,11 @@ class Bird3D {
     this.shadow.material.opacity = clamp(0.26 - h * 0.006, 0.03, 0.26);
   }
 
-  destroy() { scene.remove(this.mesh); scene.remove(this.shadow); }
+  destroy() {
+    scene.remove(this.mesh); scene.remove(this.shadow);
+    if (this.caughtMesh) { this.mesh.remove(this.caughtMesh); this.caughtMesh = null; }
+    if (this.caughtNameSprite) { scene.remove(this.caughtNameSprite); this.caughtNameSprite = null; }
+  }
 }
 
 // ===================================================================
@@ -1604,8 +1717,6 @@ const respawnBanner = document.getElementById('respawn-banner');
 function addWave(x, y, opts) {
   if (waves.length >= MAX_WAVES) waves.shift().destroy();
   waves.push(new Wave3D(x, y, opts));
-  ripples.push(new Ripple3D(x, y, { maxRadius: 40 }));
-  disturbWater(x, y, 7, 110);
 }
 
 function addRipple(x, y, opts) {
@@ -1630,6 +1741,8 @@ function addCreature(type, x, y, extra, silent) {
   if (isDead && type === 'fish') {
     c.setPlayer(myUserName);
     myFish = c; isDead = false;
+    beginFishLife(myUserName || 'you', c.tier);
+    updateFishAge();
     respawnBanner.classList.remove('visible');
     ripples.push(new Ripple3D(c.x, c.y, { maxRadius: 50 }));
   }
@@ -1659,13 +1772,36 @@ function addLily(x, y, silent) {
 // ===================================================================
 let fireflyState = null;
 
+// Procedurally generated sand grain (free — no downloads, no licensing):
+// a warm speckled canvas tiled across the beach band by the shore shader.
+function makeSandTexture() {
+  const s = 256;
+  const cv = document.createElement('canvas'); cv.width = cv.height = s;
+  const c = cv.getContext('2d');
+  c.fillStyle = '#8a7a5e'; c.fillRect(0, 0, s, s);
+  for (let i = 0; i < 9000; i++) {
+    const v = 96 + Math.floor(Math.random() * 90);
+    c.fillStyle = `rgba(${v},${Math.floor(v * 0.9)},${Math.floor(v * 0.72)},${(0.2 + Math.random() * 0.4).toFixed(2)})`;
+    c.fillRect(Math.floor(Math.random() * s), Math.floor(Math.random() * s), 1, 1);
+  }
+  for (let i = 0; i < 220; i++) { // scattered darker pebble specks
+    c.fillStyle = `rgba(58,50,38,${(0.25 + Math.random() * 0.3).toFixed(2)})`;
+    c.fillRect(Math.floor(Math.random() * s), Math.floor(Math.random() * s), 2, 1);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+let shoreUniforms = null; // animated by the main loop once the terrain builds
+
 // Build the continuous bowl terrain: a high-detail basin+shore disc and a
 // lower-detail outer forest-floor plateau, both following terrainHeight().
 // Sharing the same angular segment count keeps the shoreline seam crack-free.
 function buildTerrain(parent, HQ) {
   const G_OUT = R_WATER * 4.2;
-  const deep = new THREE.Color(0x06181f), midB = new THREE.Color(0x123a44), shallow = new THREE.Color(0x2c6f72);
-  const sandWet = new THREE.Color(0x4f8a8f), sandDamp = new THREE.Color(0x7ba39a); // blue watery sand
+  const deep = new THREE.Color(0x06181f), midB = new THREE.Color(0x0d2a35), shallow = new THREE.Color(0x1a4855);
+  const sandWet = new THREE.Color(0x3a6a72), sandDamp = new THREE.Color(0x7ba39a); // blue watery sand
   const mossLit = new THREE.Color(0x40743f), mossDk = new THREE.Color(0x1d3a24), dirt = new THREE.Color(0x281f15);
   const theta = HQ ? 80 : 40;
 
@@ -1678,8 +1814,8 @@ function buildTerrain(parent, HQ) {
     // broad shoreline beach straddling the waterline: shallow water -> wet
     // blue sand -> damp sand -> moss, all eased for a buttery-smooth blend
     // that reaches well up the outer bank.
-    if (y < 3.8) {
-      const t = clamp((y + 3.0) / 6.8, 0, 1);             // 0 (underwater) .. 1 (dry bank)
+    if (y < 1.6) {
+      const t = clamp((y + 3.0) / 4.6, 0, 1);             // 0 (underwater) .. 1 (dry bank)
       const s = t * t * (3.0 - 2.0 * t);                  // smoothstep
       const wet = shallow.clone().lerp(sandWet, clamp(s * 1.9, 0, 1));
       const dry = wet.lerp(sandDamp, clamp((s - 0.35) / 0.4, 0, 1));
@@ -1713,16 +1849,119 @@ function buildTerrain(parent, HQ) {
     return new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0, flatShading: true }));
   }
 
-  parent.add(makeRing(0.4, R_SHORE, HQ ? 28 : 12));   // basin + shore
-  parent.add(makeRing(R_SHORE, G_OUT, HQ ? 18 : 8));  // forest floor
+  parent.add(makeRing(0.4, R_SHORE, HQ ? 20 : 10));   // basin + shore
+  parent.add(makeRing(R_SHORE, G_OUT, HQ ? 12 : 6));  // forest floor
 
   // soft caustic shimmer near the bowl bottom
   const caustic = new THREE.Mesh(
     new THREE.CircleGeometry(R_PLAY * 0.95, 48).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0x39a6b8, transparent: true, opacity: 0.13, blending: THREE.AdditiveBlending, depthWrite: false })
+    new THREE.MeshBasicMaterial({ color: 0x2a7080, transparent: true, opacity: 0.07, blending: THREE.AdditiveBlending, depthWrite: false })
   );
   caustic.position.y = -POND_DEPTH + 0.6;
   parent.add(caustic);
+
+  // ---- sand shoreline + swash foam ----
+  // A draped ring straddling the waterline: warm sand grain above the water,
+  // an animated foam line that laps in and out with the swash, and alpha
+  // fades that melt it into the water inward and the mossy bank outward.
+  const SHORE_IN = R_SHORE - 13, SHORE_OUT = R_SHORE + 27;
+  const shoreGeo = new THREE.RingGeometry(SHORE_IN, SHORE_OUT, HQ ? 100 : 50, HQ ? 16 : 8);
+  shoreGeo.rotateX(-Math.PI / 2);
+  {
+    const p = shoreGeo.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i);
+      const r = Math.hypot(x, z);
+      const n = Math.sin(x * 0.21) * Math.cos(z * 0.19) * 0.5 + Math.sin((x + z) * 0.13) * 0.5;
+      // hug the terrain (same noise as makeRing), but never sink below the
+      // water plane — the seaward part of the band floats as surface foam
+      p.setY(i, Math.max(terrainHeight(r) + n * noiseAmpAt(r) + 0.4, 0.3));
+    }
+  }
+  shoreUniforms = {
+    uTime: { value: 0 },
+    uR0: { value: R_SHORE },
+    uRIn: { value: SHORE_IN },
+    uROut: { value: SHORE_OUT },
+    uSand: { value: makeSandTexture() },
+    uFog: { value: new THREE.Color(FOG_COLOR) },
+    uFogDensity: { value: scene.fog.density },
+  };
+  const shoreMat = new THREE.ShaderMaterial({
+    uniforms: shoreUniforms,
+    transparent: true,
+    depthWrite: false,
+    fog: false,
+    vertexShader: `
+      varying vec3 vW;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vW = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform float uTime; uniform float uR0; uniform float uRIn; uniform float uROut;
+      uniform sampler2D uSand; uniform vec3 uFog; uniform float uFogDensity;
+      varying vec3 vW;
+
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float noise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+      float fbm(vec2 p) { return noise(p) * 0.62 + noise(p * 2.3) * 0.38; }
+
+      void main() {
+        float r = length(vW.xz);
+        float ang = atan(vW.z, vW.x);
+
+        // the waterline breathes — three slow traveling waves lap in and out
+        float wl = uR0 - 1.5
+          + sin(uTime * 0.50 + ang * 3.0) * 2.4
+          + sin(uTime * 0.83 - ang * 5.0 + 1.7) * 1.4
+          + sin(uTime * 0.31 + ang * 1.0 + 0.6) * 1.6;
+        float d = r - wl;               // <0 = open water, >0 = up the beach
+
+        // sand grain, darker and teal-tinted where the swash keeps it wet
+        vec3 grain = texture2D(uSand, vW.xz * 0.13).rgb;
+        float wet = smoothstep(7.0, 0.5, d);
+        vec3 col = mix(grain, grain * vec3(0.45, 0.62, 0.66), wet);
+
+        // foam crest riding the waterline, noise-broken so it reads as
+        // bubbles; it surges on the push and thins on the backwash
+        float breakup = fbm(vW.xz * 0.45 + vec2(uTime * 0.10, -uTime * 0.07));
+        float band = smoothstep(3.0, 0.3, abs(d + 0.3));
+        float surge = 0.75 + 0.35 * cos(uTime * 0.50 + ang * 3.0);
+        float foam = band * smoothstep(0.30, 0.72, breakup * 0.75 + band * 0.45) * surge;
+        // receding lace left floating just behind the waterline
+        float streaks = smoothstep(0.0, -4.5, d) * smoothstep(-10.0, -4.5, d)
+                      * smoothstep(0.60, 0.95, fbm(vW.xz * 0.3 + vec2(0.0, uTime * 0.05))) * 0.55;
+        float foamAll = clamp(foam + streaks, 0.0, 1.0);
+        col = mix(col, vec3(0.82, 0.90, 0.90), foamAll);
+
+        // bare sand only above the waterline; the whole band dissolves
+        // into the water inward and the moss outward
+        float sandVis = smoothstep(-4.0, -0.5, d) * 0.92;
+        float innerFade = smoothstep(uRIn, uRIn + 6.0, r);
+        float outerFade = smoothstep(uROut, uROut - 9.0, r);
+        float alpha = clamp(sandVis + foamAll, 0.0, 1.0) * innerFade * outerFade;
+
+        // manual fog to match the water shader
+        float dc = length(cameraPosition - vW);
+        float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dc * dc);
+        col = mix(col, uFog, clamp(fogF, 0.0, 1.0));
+
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+  const shore = new THREE.Mesh(shoreGeo, shoreMat);
+  shore.renderOrder = 3;
+  parent.add(shore);
 }
 
 // ===== TREE VARIATIONS =====
@@ -2009,7 +2248,7 @@ function buildEnvironment() {
   // vertex shader wind animation — far cheaper than 3D grass GLBs.
   const grassMinR = R_SHORE + R_WATER * 0.14;   // past the sandy beach
   const grassMaxR = R_WATER * 3.5;               // out to forest edge
-  const grassCount = HQ ? 300 : 60;
+  const grassCount = HQ ? 180 : 40;
   const grassBlades = [];
 
   // procedural grass texture — tall clump, visible from distance
@@ -2193,9 +2432,6 @@ function buildEnvironment() {
   // ---- energy dome (transparent geodesic shell over the pond) ----
   buildDome();
 
-  // ---- observation platform ring (tourist walkway at terrain edge) ----
-  buildPlatform();
-
   // ---- fireflies drifting over the water ----
   if (HQ) buildFireflies();
 }
@@ -2366,7 +2602,7 @@ function buildDome() {
   scene.add(shell);
 
   // glowing equator ring
-  const ringGeo = new THREE.TorusGeometry(DOME_R, 0.3, 8, 80);
+  const ringGeo = new THREE.TorusGeometry(DOME_R, 0.3, 8, 48);
   ringGeo.rotateX(Math.PI / 2);
   const ringMat = new THREE.MeshBasicMaterial({ color: 0x4fd9ff, transparent: true, opacity: 0.3, fog: false });
   const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -2374,89 +2610,6 @@ function buildDome() {
 
   // store for animation
   window.__dome = { mat: domeMat, shellMat, ringMat };
-}
-
-// ===== OBSERVATION PLATFORM =====
-// A circular walkway at the terrain edge with railing — like a tourist
-// viewing deck overlooking the pond from inside the dome.
-function buildPlatform() {
-  const platR = R_WATER * 1.06;
-  const platW = 6;
-
-  // walkway surface
-  const walkGeo = new THREE.RingGeometry(platR, platR + platW, 80, 2);
-  walkGeo.rotateX(-Math.PI / 2);
-  const walkMat = stdMat(0x3a4a5a, { roughness: 0.6, metalness: 0.3, flatShading: true });
-  const walk = new THREE.Mesh(walkGeo, walkMat);
-  walk.position.y = terrainHeight(platR) + 0.5;
-  scene.add(walk);
-
-  // glowing edge strips
-  const edgeInGeo = new THREE.RingGeometry(platR - 0.2, platR + 0.2, 80, 1);
-  edgeInGeo.rotateX(-Math.PI / 2);
-  const edgeOutGeo = new THREE.RingGeometry(platR + platW - 0.2, platR + platW + 0.2, 80, 1);
-  edgeOutGeo.rotateX(-Math.PI / 2);
-  const edgeMat = new THREE.MeshBasicMaterial({ color: 0x4fd9ff, transparent: true, opacity: 0.5, fog: false });
-  const edgeIn = new THREE.Mesh(edgeInGeo, edgeMat);
-  edgeIn.position.y = walk.position.y + 0.06;
-  scene.add(edgeIn);
-  const edgeOut = new THREE.Mesh(edgeOutGeo, edgeMat);
-  edgeOut.position.y = walk.position.y + 0.06;
-  scene.add(edgeOut);
-
-  // railing posts — InstancedMesh (single draw call for all posts)
-  const railH = 1.8;
-  const postGeo = new THREE.CylinderGeometry(0.06, 0.06, railH, 4);
-  const railMat = stdMat(0x6a7a8a, { roughness: 0.4, metalness: 0.5 });
-  const postCount = 24;
-  const totalPosts = postCount * 2;
-  const postMesh = new THREE.InstancedMesh(postGeo, railMat, totalPosts);
-  const _pObj = new THREE.Object3D();
-  let pi = 0;
-  for (let i = 0; i < postCount; i++) {
-    const a = (i / postCount) * Math.PI * 2;
-    _pObj.position.set(Math.cos(a) * platR, walk.position.y + railH / 2, Math.sin(a) * platR);
-    _pObj.updateMatrix(); postMesh.setMatrixAt(pi++, _pObj.matrix);
-    _pObj.position.set(Math.cos(a) * (platR + platW), walk.position.y + railH / 2, Math.sin(a) * (platR + platW));
-    _pObj.updateMatrix(); postMesh.setMatrixAt(pi++, _pObj.matrix);
-  }
-  postMesh.instanceMatrix.needsUpdate = true;
-  scene.add(postMesh);
-
-  // top rail rings (torus)
-  const railInGeo = new THREE.TorusGeometry(platR, 0.05, 6, 64);
-  railInGeo.rotateX(Math.PI / 2);
-  const railIn = new THREE.Mesh(railInGeo, railMat);
-  railIn.position.y = walk.position.y + railH;
-  scene.add(railIn);
-  const railOutGeo = new THREE.TorusGeometry(platR + platW, 0.05, 6, 64);
-  railOutGeo.rotateX(Math.PI / 2);
-  const railOut = new THREE.Mesh(railOutGeo, railMat);
-  railOut.position.y = walk.position.y + railH;
-  scene.add(railOut);
-
-  // support pillars — InstancedMesh
-  const pillarGeo = new THREE.CylinderGeometry(0.15, 0.2, 1, 6);
-  const pillarMat = stdMat(0x2a3a4a, { roughness: 0.7, metalness: 0.3, flatShading: true });
-  const pillarCount = 12;
-  const pillarMesh = new THREE.InstancedMesh(pillarGeo, pillarMat, pillarCount);
-  let pilI = 0;
-  for (let i = 0; i < pillarCount; i++) {
-    const a = (i / pillarCount) * Math.PI * 2;
-    const px = Math.cos(a) * (platR + platW / 2), pz = Math.sin(a) * (platR + platW / 2);
-    const gy = terrainHeight(Math.hypot(px, pz));
-    const ph = walk.position.y - gy;
-    if (ph > 0.5) {
-      _pObj.position.set(px, gy + ph / 2, pz);
-      _pObj.scale.set(1, ph, 1);
-      _pObj.updateMatrix();
-      pillarMesh.setMatrixAt(pilI++, _pObj.matrix);
-      _pObj.scale.set(1, 1, 1);
-    }
-  }
-  pillarMesh.count = pilI;
-  pillarMesh.instanceMatrix.needsUpdate = true;
-  scene.add(pillarMesh);
 }
 
 function buildFireflies() {
@@ -2551,6 +2704,7 @@ canvas.addEventListener('pointerup', (e) => {
   const p = screenToGame(e.clientX, e.clientY);
   if (!p) return;
   disturbWater(p.x, p.y, 8, 120);
+  playBloop(340 + Math.random() * 140, 0.032, 0.18);
   doAction(p.x, p.y);
   hideHintOnce();
 });
@@ -2564,6 +2718,9 @@ function doAction(x, y) {
         triggerWaveCooldown();
         incrementStat('totalWaves');
         sendAction({ type: 'wave', x: normX(x), y: normY(y), splashAngle });
+      } else {
+        // cooling down — a small fizzle so the tap never feels ignored
+        addRipple(x, y, { maxRadius: 16, speed: 1.4, opacity: 0.18 });
       }
       break;
     case 'fish':
@@ -2694,58 +2851,6 @@ function maybeSpawnRandomBirds() {
 }
 
 // ===================================================================
-// RED BUTTON + WAVE POOL
-// ===================================================================
-let redButtonEl = null;
-let wavePoolActive = false;
-let wavePoolTimer = 0;
-const wavePoolBanner = document.getElementById('wave-pool-banner');
-
-function updateRedButton() {
-  if (!redButtonEl && !wavePoolActive && Math.random() < 0.000167) spawnRedButton();
-  if (wavePoolActive) {
-    wavePoolTimer -= 1;
-    waterUniforms.uWavePool.value = Math.min(1, waterUniforms.uWavePool.value + 0.05);
-    if (Math.random() < 0.15) {
-      const edge = Math.floor(Math.random() * 4);
-      let wx, wy, angle;
-      switch (edge) {
-        case 0: wx = 0; wy = Math.random() * H; angle = 0; break;
-        case 1: wx = W; wy = Math.random() * H; angle = Math.PI; break;
-        case 2: wx = Math.random() * W; wy = 0; angle = Math.PI / 2; break;
-        case 3: wx = Math.random() * W; wy = H; angle = -Math.PI / 2; break;
-      }
-      addWave(wx, wy, { splashAngle: angle, maxRadius: 300, force: 12, speed: 4 });
-    }
-    if (wavePoolTimer <= 0) { wavePoolActive = false; wavePoolBanner.classList.remove('visible'); }
-  } else if (waterUniforms.uWavePool.value > 0) {
-    waterUniforms.uWavePool.value = Math.max(0, waterUniforms.uWavePool.value - 0.03);
-  }
-}
-
-function spawnRedButton() {
-  redButtonEl = document.createElement('div');
-  redButtonEl.id = 'red-button';
-  const margin = 90;
-  redButtonEl.style.left = (margin + Math.random() * (window.innerWidth - margin * 2 - 52)) + 'px';
-  redButtonEl.style.top = (margin + Math.random() * (window.innerHeight - margin * 2 - 52)) + 'px';
-  redButtonEl.addEventListener('click', (e) => {
-    e.stopPropagation();
-    activateWavePool();
-    if (redButtonEl) { redButtonEl.remove(); redButtonEl = null; }
-    sendAction({ type: 'wavepool' });
-  });
-  document.body.appendChild(redButtonEl);
-  setTimeout(() => { if (redButtonEl) { redButtonEl.remove(); redButtonEl = null; } }, 15000);
-}
-
-function activateWavePool() {
-  wavePoolActive = true;
-  wavePoolTimer = 600;
-  wavePoolBanner.classList.add('visible');
-}
-
-// ===================================================================
 // WEBSOCKET CLIENT  (same protocol as the 2D pond)
 // ===================================================================
 let ws = null;
@@ -2755,6 +2860,7 @@ let reconnectAttempts = 0;
 let useFallbackURL = false;
 let myUserId = null;
 let myUserName = '';
+let lastPresenceCount = null;
 const onlineCountEl = document.getElementById('online-count');
 
 function connectWS() {
@@ -2768,12 +2874,18 @@ function connectWS() {
     clearTimeout(connectTimeout);
     opened = true; wsConnected = true; reconnectAttempts = 0;
     onlineCountEl.textContent = 'connected';
+    onlineCountEl.classList.remove('state-reconnecting', 'state-offline');
   };
   ws.onmessage = (event) => { try { handleMessage(JSON.parse(event.data)); } catch (e) {} };
   ws.onclose = () => {
     clearTimeout(connectTimeout);
+    const wasConnected = wsConnected;
     wsConnected = false;
     if (!opened) useFallbackURL = !useFallbackURL;
+    if (wasConnected) {
+      onlineCountEl.textContent = 'reconnecting…';
+      onlineCountEl.classList.add('state-reconnecting');
+    }
     scheduleReconnect();
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
@@ -2782,7 +2894,12 @@ function connectWS() {
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectAttempts++;
-  if (reconnectAttempts > 10) { onlineCountEl.textContent = 'offline — solo mode'; return; }
+  if (reconnectAttempts > 10) {
+    onlineCountEl.textContent = 'offline — a pond of your own';
+    onlineCountEl.classList.remove('state-reconnecting');
+    onlineCountEl.classList.add('state-offline');
+    return;
+  }
   const delay = IS_MOBILE ? 4000 : 2500;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectWS(); }, delay);
 }
@@ -2810,13 +2927,27 @@ function handleMessage(msg) {
       break;
     case 'presence':
       onlineCountEl.textContent = `${msg.count} ${msg.count === 1 ? 'soul' : 'souls'} in the pond`;
+      onlineCountEl.classList.remove('state-reconnecting', 'state-offline');
+      if (lastPresenceCount !== null && msg.count !== lastPresenceCount) {
+        onlineCountEl.classList.remove('flash');
+        void onlineCountEl.offsetWidth; // restart the animation
+        onlineCountEl.classList.add('flash');
+      }
+      lastPresenceCount = msg.count;
       break;
-    case 'join':
-      addToast(msg.user.name, 'joined the pond', 'join');
+    case 'join': {
+      // arrivals are quiet ripples somewhere on the water, not announcements
+      const jp = randomPondPoint(R_WATER * 0.85);
+      addRipple(jp.x, jp.y, { maxRadius: 44, speed: 0.8, opacity: 0.24 });
+      addToast(msg.user.name, 'slipped into the pond', 'join');
       break;
-    case 'leave':
-      addToast(msg.name, 'left the pond', 'leave');
+    }
+    case 'leave': {
+      const lp = randomPondPoint(R_WATER * 0.85);
+      addRipple(lp.x, lp.y, { maxRadius: 30, speed: 0.6, opacity: 0.16 });
+      addToast(msg.name, 'drifted away', 'leave');
       break;
+    }
     case 'users':
       renderUserList(msg.users);
       break;
@@ -2847,9 +2978,141 @@ function applyRemoteAction(action) {
       if (evt) { currentEvent = evt; currentEventStart = Date.now(); evt.spawn(); showEventBanner(evt, EVENT_DURATION); }
       break;
     }
-    case 'wavepool': activateWavePool(); break;
     case 'birds': spawnBirdBarrage(); break;
   }
+}
+
+// ===================================================================
+// AMBIENT AUDIO — tiny procedural water sounds (Web Audio, no files).
+// Restrained by design: very low volume, few triggers, easy mute.
+// ===================================================================
+let audioCtx = null;
+let soundMuted = false;
+try { soundMuted = localStorage.getItem('pond_muted') === '1'; } catch (e) {}
+const muteBtn = document.getElementById('mute-btn');
+function renderMuteBtn() { if (muteBtn) muteBtn.textContent = soundMuted ? '🔇' : '🔊'; }
+renderMuteBtn();
+if (muteBtn) muteBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  soundMuted = !soundMuted;
+  try { localStorage.setItem('pond_muted', soundMuted ? '1' : '0'); } catch (e2) {}
+  renderMuteBtn();
+});
+
+function ensureAudio() {
+  if (audioCtx) return audioCtx;
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+  return audioCtx;
+}
+
+// A soft sine "droplet": quick downward pitch glide with a fast decay.
+function playBloop(freq, vol, dur) {
+  if (soundMuted) return;
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+  try {
+    freq = freq || 420; vol = vol || 0.04; dur = dur || 0.22;
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.55, t0 + dur);
+    gain.gain.setValueAtTime(vol, t0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+  } catch (e) {}
+}
+
+// Two gentle rising notes — used only for achievement unlocks.
+function playChime() {
+  playBloop(660, 0.03, 0.5);
+  setTimeout(() => playBloop(880, 0.026, 0.6), 130);
+}
+
+// ===================================================================
+// FISH MEMORY — emotional continuity via localStorage only.
+// The visitor's fish is remembered between visits: its birth time keeps
+// counting while they're away, and a faded fish leaves a lifetime behind.
+// ===================================================================
+const MY_FISH_KEY = 'pond_my_fish';
+function loadMyFishRecord() { try { return JSON.parse(localStorage.getItem(MY_FISH_KEY) || 'null'); } catch (e) { return null; } }
+function saveMyFishRecord(r) { try { localStorage.setItem(MY_FISH_KEY, JSON.stringify(r)); } catch (e) {} }
+let myFishRecord = loadMyFishRecord();
+// Captured once at boot: the story of the previous visit's fish (if any).
+const prevFishRecord = myFishRecord;
+
+function formatDuration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + (s % 60) + 's';
+  return s + 's';
+}
+
+// Start (or quietly continue) a fish life. A record that never faded means
+// the visitor left with their fish alive — the same life resumes, its age
+// still counting from the original birth.
+function beginFishLife(name, tier) {
+  if (myFishRecord && !myFishRecord.faded) {
+    myFishRecord.name = name;
+    myFishRecord.tier = tier;
+    myFishRecord.lastSeen = Date.now();
+  } else {
+    myFishRecord = { name, tier, born: Date.now(), lastSeen: Date.now() };
+  }
+  saveMyFishRecord(myFishRecord);
+}
+
+// Close out a life when the fish fades: persist the lifetime and surface it
+// in the respawn card so the loss reads as a life lived, not an error.
+function endFishLife() {
+  const el = document.getElementById('respawn-lifetime');
+  if (myFishRecord && !myFishRecord.faded) {
+    myFishRecord.faded = Date.now();
+    saveMyFishRecord(myFishRecord);
+    if (el) el.textContent = 'it swam for ' + formatDuration(myFishRecord.faded - myFishRecord.born);
+  } else if (el) {
+    el.textContent = '';
+  }
+  const ageEl = document.getElementById('fish-age');
+  if (ageEl) ageEl.textContent = '';
+}
+
+function updateFishAge() {
+  const ageEl = document.getElementById('fish-age');
+  if (!ageEl) return;
+  if (myFish && myFishRecord && !myFishRecord.faded) {
+    ageEl.textContent = '🐟 ' + formatDuration(Date.now() - myFishRecord.born);
+  } else {
+    ageEl.textContent = '';
+  }
+}
+
+// ===================================================================
+// WELCOME CARD — one quiet confirmation that your fish is in the pond
+// ===================================================================
+const welcomeCard = document.getElementById('welcome-card');
+let welcomeShown = false;
+
+function showWelcomeCard() {
+  if (welcomeShown || !welcomeCard) return;
+  welcomeShown = true;
+  const title = welcomeCard.querySelector('.welcome-title');
+  const sub = welcomeCard.querySelector('.welcome-sub');
+  if (prevFishRecord && !prevFishRecord.faded && title && sub) {
+    // returning visitor whose fish never faded — the same life continues
+    title.textContent = 'your fish is still here';
+    sub.textContent = 'it has been swimming for ' + formatDuration(Date.now() - prevFishRecord.born);
+  } else if (prevFishRecord && prevFishRecord.faded && title && sub) {
+    title.textContent = 'a new fish joins the pond';
+    sub.textContent = 'your last one swam for ' + formatDuration(prevFishRecord.faded - prevFishRecord.born);
+  }
+  welcomeCard.classList.add('visible');
+  setTimeout(() => welcomeCard.classList.remove('visible'), 5200);
 }
 
 // ===================================================================
@@ -2894,7 +3157,7 @@ function reportFishLife() {
 
 function updateFishLivesDisplay() {
   const el = document.getElementById('fish-lives');
-  if (el) el.textContent = 'Fish Lives Lived: ' + fishLivesCount.toLocaleString();
+  if (el) el.textContent = fishLivesCount.toLocaleString() + ' fish lives lived';
 }
 
 function spawnPlayerFish() {
@@ -2904,7 +3167,15 @@ function spawnPlayerFish() {
   creatures.push(fish);
   myFish = fish; isDead = false;
   respawnBanner.classList.remove('visible');
-  ripples.push(new Ripple3D(fish.x, fish.y, { maxRadius: 50 })); // fish.x/y are post-clamp
+  // emergence moment: a strong ripple, a delayed echo, stirred water, a soft bloop
+  ripples.push(new Ripple3D(fish.x, fish.y, { maxRadius: 80 })); // fish.x/y are post-clamp
+  disturbWater(fish.x, fish.y, 9, 130);
+  setTimeout(() => { if (myFish === fish) addRipple(fish.x, fish.y, { maxRadius: 46, speed: 0.9, opacity: 0.26 }); }, 260);
+  playBloop(300, 0.045, 0.3);
+  setTimeout(() => playBloop(430, 0.04, 0.35), 180);
+  beginFishLife(myUserName || 'you', fish.tier);
+  updateFishAge();
+  showWelcomeCard();
   reportFishLife();
 }
 
@@ -2916,7 +3187,6 @@ function describeAction(action) {
     case 'lily': return 'planted a lily pad';
     case 'plankton': return 'released plankton';
     case 'event': return 'triggered an event';
-    case 'wavepool': return 'pressed the red button!';
     case 'birds': return 'summoned birds!';
     default: return action.type;
   }
@@ -2943,6 +3213,8 @@ function addToast(name, action, type) {
 // ===================================================================
 let sessionStart = Date.now();
 let sessionTimerHandle = null;
+let loopErrorCount = 0;
+let loopErrorNotified = false;
 
 function startSessionTimer() {
   const el = document.getElementById('session-timer');
@@ -2952,12 +3224,18 @@ function startSessionTimer() {
     const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const ss = String(elapsed % 60).padStart(2, '0');
     if (el) el.textContent = `${mm}:${ss}`;
+    updateFishAge();
     // accrue lifetime time every 5s to limit writes
     if (elapsed > 0 && elapsed % 5 === 0) {
       const s = loadStats();
       s.totalTimeSeconds = (s.totalTimeSeconds || 0) + 5;
       saveStats(s);
       checkAchievements(s);
+      // heartbeat for fish continuity — the life is still being lived
+      if (myFish && myFishRecord && !myFishRecord.faded) {
+        myFishRecord.lastSeen = Date.now();
+        saveMyFishRecord(myFishRecord);
+      }
     }
   }, 1000);
 }
@@ -2982,14 +3260,20 @@ function incrementStat(key) {
   if (userPanel.classList.contains('visible')) renderStats(s);
 }
 
+// Each achievement exposes prog(s) -> [current, goal] so locked pills can
+// show honest progress instead of an opaque locked state.
 const ACHIEVEMENTS = [
-  { id: 'first_wave', name: 'First Wave', ico: '🌊', check: s => (s.totalWaves || 0) >= 1 },
-  { id: 'pond_keeper', name: 'Pond Keeper', ico: '🌿', check: s => (s.totalLilies || 0) >= 10 },
-  { id: 'fish_farmer', name: 'Fish Farmer', ico: '🐟', check: s => (s.totalFish || 0) >= 25 },
-  { id: 'frog_friend', name: 'Frog Friend', ico: '🐸', check: s => (s.totalFrogs || 0) >= 10 },
-  { id: 'pond_regular', name: 'Pond Regular', ico: '🔥', check: s => (s.streak || 0) >= 3 },
-  { id: 'deep_diver', name: 'Deep Diver', ico: '🤿', check: s => (s.totalTimeSeconds || 0) >= 1800 },
+  { id: 'first_wave', name: 'First Wave', ico: '🌊', prog: s => [s.totalWaves || 0, 1] },
+  { id: 'ripple_maker', name: 'Ripple Maker', ico: '🌀', prog: s => [s.totalWaves || 0, 50] },
+  { id: 'life_giver', name: 'Life Giver', ico: '🫧', prog: s => [s.totalFish || 0, 10] },
+  { id: 'fish_farmer', name: 'Fish Farmer', ico: '🐟', prog: s => [s.totalFish || 0, 25] },
+  { id: 'pond_keeper', name: 'Pond Keeper', ico: '🌿', prog: s => [s.totalLilies || 0, 10] },
+  { id: 'frog_friend', name: 'Frog Friend', ico: '🐸', prog: s => [s.totalFrogs || 0, 10] },
+  { id: 'pond_regular', name: 'Pond Regular', ico: '🔥', prog: s => [s.streak || 0, 3] },
+  { id: 'pond_observer', name: 'Pond Observer', ico: '👁', prog: s => [Math.floor((s.totalTimeSeconds || 0) / 60), 10] },
+  { id: 'deep_diver', name: 'Deep Diver', ico: '🤿', prog: s => [Math.floor((s.totalTimeSeconds || 0) / 60), 30] },
 ];
+ACHIEVEMENTS.forEach(a => { a.check = s => { const p = a.prog(s); return p[0] >= p[1]; }; });
 
 function loadUnlocked() { try { return JSON.parse(localStorage.getItem('pond_achievements') || '[]'); } catch (e) { return []; } }
 function checkAchievements(stats) {
@@ -2998,7 +3282,12 @@ function checkAchievements(stats) {
   for (const a of ACHIEVEMENTS) {
     if (!unlocked.includes(a.id) && a.check(stats)) {
       unlocked.push(a.id); changed = true;
-      addToast('achievement', `unlocked · ${a.name}`, 'event');
+      addToast('achievement', `unlocked · ${a.ico} ${a.name}`, 'event');
+      playChime();
+      // draw the eye to the panel entrance without opening anything
+      onlineCountEl.classList.remove('flash-gold');
+      void onlineCountEl.offsetWidth;
+      onlineCountEl.classList.add('flash-gold');
     }
   }
   if (changed) {
@@ -3048,9 +3337,14 @@ function renderStats(s) {
 function renderAchievements() {
   const el = document.getElementById('panel-achievements');
   const unlocked = loadUnlocked();
+  const s = loadStats();
   el.innerHTML = ACHIEVEMENTS.map(a => {
     const on = unlocked.includes(a.id);
-    return `<div class="achv-pill ${on ? 'unlocked' : ''}"><span class="achv-ico">${a.ico}</span>${escapeHtml(a.name)}</div>`;
+    if (on) return `<div class="achv-pill unlocked"><span class="achv-ico">${a.ico}</span>${escapeHtml(a.name)}</div>`;
+    const p = a.prog(s);
+    const cur = Math.min(p[0], p[1]);
+    const pct = Math.round((cur / p[1]) * 100);
+    return `<div class="achv-pill"><span class="achv-ico">${a.ico}</span>${escapeHtml(a.name)} <span class="achv-count">${cur}/${p[1]}</span><span class="achv-bar" style="width:${pct}%"></span></div>`;
   }).join('');
 }
 
@@ -3174,6 +3468,9 @@ function animate() {
     // animate space skybox
     if (window.__skyShader) window.__skyShader.uniforms.uTime.value = t;
 
+    // animate the shoreline swash foam
+    if (shoreUniforms) shoreUniforms.uTime.value = t;
+
     // animate dome pulse
     if (window.__dome) {
       const p = 0.10 + 0.04 * Math.sin(t * 0.8);
@@ -3216,8 +3513,8 @@ function animate() {
       }
     }
 
-    // animate billboard grass: face camera + wind sway (throttled to every 3 frames)
-    if (window.__grassBlades && (frameCount % 3 === 0)) {
+    // animate billboard grass: face camera + wind sway (throttled to every 5 frames)
+    if (window.__grassBlades && (frameCount % 5 === 0)) {
       const blades = window.__grassBlades;
       const camPos = camera.position;
       for (let i = 0; i < blades.length; i++) {
@@ -3231,13 +3528,17 @@ function animate() {
       }
     }
 
-    lilies = lilies.filter(l => { const a = l.update(); if (a) l.sync3D(); else l.destroy(); return a; });
-    ripples = ripples.filter(r => { const a = r.update(); if (a) r.sync3D(); else r.destroy(); return a; });
+    if (frameCount % 2 === 0) {
+      lilies = lilies.filter(l => { const a = l.update(); if (a) l.sync3D(); else l.destroy(); return a; });
+      ripples = ripples.filter(r => { const a = r.update(); if (a) r.sync3D(); else r.destroy(); return a; });
+    }
     plankton = plankton.filter(p => { const a = p.update(dt); if (a) p.sync3D(); else p.destroy(); return a; });
     creatures = creatures.filter(c => { const a = c.update(dt); if (a) c.sync3D(dt); else c.destroy(); return a; });
 
     if (myFish && (myFish.life <= 0 || !creatures.includes(myFish))) {
-      myFish = null; isDead = true; respawnBanner.classList.add('visible');
+      myFish = null; isDead = true;
+      endFishLife();
+      respawnBanner.classList.add('visible');
     }
 
     birds = birds.filter(b => { const a = b.update(dt); if (a) b.sync3D(); else b.destroy(); return a; });
@@ -3245,7 +3546,6 @@ function animate() {
 
     if (frameCount % 2 === 0) updateCooldown();
     if (frameCount % 4 === 0) updateEvents();
-    if (frameCount % 4 === 0) updateRedButton();
     if (frameCount % 60 === 0) maybeSpawnRandomBirds();
     if (frameCount % 45 === 0 && plankton.length < PLANKTON_BASELINE) topUpPlankton();
 
@@ -3262,7 +3562,16 @@ function animate() {
       controls.update();
     }
     renderer.render(scene, camera);
-  } catch (e) { /* keep the loop alive */ }
+    loopErrorCount = 0;
+  } catch (e) {
+    // keep the loop alive, but if errors persist for ~4s of frames, tell the
+    // visitor once instead of leaving a silently frozen pond
+    loopErrorCount++;
+    if (loopErrorCount === 240 && !loopErrorNotified) {
+      loopErrorNotified = true;
+      try { addToast('the pond', 'something rippled wrong — refresh if the water looks still', 'event'); } catch (e2) {}
+    }
+  }
 }
 
 // ===================================================================
@@ -3305,12 +3614,13 @@ function init() {
 
   animate();
 
-  // reveal the scene
-  setTimeout(() => {
-    const ls = document.getElementById('loading-screen');
-    if (ls) ls.classList.add('hidden');
-  }, 700);
+  // reveal the scene — the first frame has already rendered inside animate(),
+  // so this is a short grace beat rather than a blind guess
+  setTimeout(hideLoadingScreen, 400);
 }
 
-// Load GLB assets (procedural fallback on any failure), then start.
-Promise.all(Object.entries(ASSETS).map(([k, v]) => loadAsset(k, v))).then(init);
+// Load GLB assets (procedural fallback on any failure), then start. A slow
+// network can't strand the loading screen: after 15s we boot regardless and
+// any stragglers simply resolve into the asset cache unused-until-next-spawn.
+const assetsReady = Promise.all(Object.entries(ASSETS).map(([k, v]) => loadAsset(k, v)));
+Promise.race([assetsReady, new Promise(res => setTimeout(res, 15000))]).then(init);
