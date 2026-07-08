@@ -49,8 +49,6 @@ const MAX_RIPPLES = 120;
 const MAX_LILIES = 40;
 const MAX_WAVES = 30;
 const MAX_BIRDS = LOW_QUALITY ? 18 : 36;
-const WAVE_COOLDOWN = 800;
-const WAVE_COOLUP = 200;
 const LILY_PLACE_COOLDOWN = 2000;
 const OFFSCREEN_MARGIN = 80;
 
@@ -1712,7 +1710,6 @@ const respawnBanner = document.getElementById('respawn-banner');
 function addWave(x, y, opts) {
   if (waves.length >= MAX_WAVES) waves.shift().destroy();
   waves.push(new Wave3D(x, y, opts));
-  disturbWater(x, y, 8, 120);
 }
 
 function addRipple(x, y, opts) {
@@ -2708,16 +2705,10 @@ canvas.addEventListener('pointerup', (e) => {
 function doAction(x, y) {
   switch (currentTool) {
     case 'wave':
-      if (waveReady) {
-        const splashAngle = Math.random() * Math.PI * 2;
-        addWave(x, y, { splashAngle });
-        triggerWaveCooldown();
-        incrementStat('totalWaves');
-        sendAction({ type: 'wave', x: normX(x), y: normY(y), splashAngle });
-      } else {
-        // cooling down — a small fizzle so the tap never feels ignored
-        addRipple(x, y, { maxRadius: 16, speed: 1.4, opacity: 0.18 });
-      }
+      const splashAngle = Math.random() * Math.PI * 2;
+      addWave(x, y, { splashAngle });
+      incrementStat('totalWaves');
+      sendAction({ type: 'wave', x: normX(x), y: normY(y), splashAngle });
       break;
     case 'fish':
       addCreature('fish', x, y);
@@ -2756,29 +2747,6 @@ function updateToolButtons() {
   document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === currentTool));
 }
 updateToolButtons();
-
-// ===== WAVE COOLDOWN =====
-let waveReady = true;
-let waveCooldownStart = 0;
-const cooldownBar = document.getElementById('cooldown-bar');
-const cooldownFill = document.getElementById('cooldown-fill');
-
-function updateCooldown() {
-  if (waveReady) {
-    cooldownBar.classList.remove('visible');
-    cooldownFill.classList.add('ready');
-    cooldownFill.style.width = '100%';
-    return;
-  }
-  const elapsed = Date.now() - waveCooldownStart;
-  const total = WAVE_COOLDOWN + WAVE_COOLUP;
-  const pct = Math.min(elapsed / total, 1);
-  cooldownBar.classList.add('visible');
-  cooldownFill.classList.remove('ready');
-  cooldownFill.style.width = (pct * 100) + '%';
-  if (pct >= 1) { waveReady = true; cooldownBar.classList.remove('visible'); cooldownFill.classList.add('ready'); }
-}
-function triggerWaveCooldown() { waveReady = false; waveCooldownStart = Date.now(); }
 
 // ===================================================================
 // EVENT SYSTEM
@@ -3540,7 +3508,6 @@ function animate() {
     birds = birds.filter(b => { const a = b.update(dt); if (a) b.sync3D(); else b.destroy(); return a; });
     waves = waves.filter(w => { const a = w.update(dt); if (a) w.sync3D(); else w.destroy(); return a; });
 
-    if (frameCount % 2 === 0) updateCooldown();
     if (frameCount % 4 === 0) updateEvents();
     if (frameCount % 60 === 0) maybeSpawnRandomBirds();
     if (frameCount % 45 === 0 && plankton.length < PLANKTON_BASELINE) topUpPlankton();
