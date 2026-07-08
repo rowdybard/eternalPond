@@ -964,8 +964,7 @@ class Wave3D {
     this.disturbAccum += dt;
     if (this.disturbAccum > 0.3) {
       this.disturbAccum = 0;
-      disturbWater(this.x + Math.cos(this.splashAngle) * this.radius,
-                   this.y + Math.sin(this.splashAngle) * this.radius, waveStrength * 4, 60);
+      disturbWater(this.x, this.y, waveStrength * 5, 60);
     }
     return this.life > 0;
   }
@@ -1875,7 +1874,7 @@ function buildTerrain(parent, HQ) {
       const n = Math.sin(x * 0.21) * Math.cos(z * 0.19) * 0.5 + Math.sin((x + z) * 0.13) * 0.5;
       // hug the terrain (same noise as makeRing), but never sink below the
       // water plane — the seaward part of the band floats as surface foam
-      p.setY(i, Math.max(terrainHeight(r) + n * noiseAmpAt(r) + 0.4, 0.3));
+      p.setY(i, Math.max(terrainHeight(r) + n * noiseAmpAt(r) + 1.2, 1.0));
     }
   }
   shoreUniforms = {
