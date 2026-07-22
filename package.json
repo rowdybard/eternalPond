@@ -2,8 +2,25 @@
   "name": "shared-pond",
   "version": "1.0.0",
   "private": true,
+  "workspaces": [
+    "v2/shared",
+    "v2/worker"
+  ],
   "scripts": {
-    "build": "echo \"No build needed — frontend is static HTML/JS\"",
-    "deploy": "echo \"No build needed — frontend is static HTML/JS\""
+    "build:v2": "npm run build --workspace @eternal-pond/worker",
+    "check:frontend": "node --check frontend/pond-client-v2.js && node --check frontend/pond-ui.js && node --check frontend/pond-canvas-v2.js && node --check frontend/pond-boot.js && node --check frontend/pond3d.js && node --check frontend/pond-runtime-v2.js",
+    "check:v2": "npm run check:frontend && npm run check --workspace @eternal-pond/shared && npm run check --workspace @eternal-pond/worker",
+    "test:v2": "npm run test --workspace @eternal-pond/worker",
+    "load:v2": "node v2/worker/scripts/load-test.mjs",
+    "dev:web": "vite frontend --host 127.0.0.1 --port 5173",
+    "dev:v2:web": "npm run dev:web",
+    "dev:v2:worker": "npm run dev --workspace @eternal-pond/worker",
+    "build": "npm run check:frontend && npm run build:v2",
+    "deploy:v2:worker": "npm run deploy --workspace @eternal-pond/worker",
+    "deploy": "npm run check:v2 && npm run test:v2 && npm run deploy:v2:worker"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "vite": "8.1.5"
   }
 }

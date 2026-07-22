@@ -1,99 +1,100 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <meta name="description" content="A quiet, persistent shared pond. Spawn a fish, stir the water, and leave a ripple in a world that keeps existing after you go.">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="A tiny shared ecosystem beneath a moving sky.">
+  <meta name="theme-color" content="#050510">
+  <meta property="og:title" content="eternal pond">
+  <meta property="og:description" content="A quiet world, shared.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://eternalpond.com/">
   <title>eternal pond</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Loading screen -->
-  <div id="loading-screen">
-    <div class="loading-ripple"></div>
-    <div class="loading-ripple loading-ripple-2"></div>
-    <div class="loading-title">eternal pond</div>
-    <div class="loading-sub">a quiet world, shared</div>
-    <div class="loading-bar"><div class="loading-bar-fill"></div></div>
-    <div class="loading-status">summoning the water…</div>
-  </div>
+  <main id="app">
+    <canvas id="pond3d" tabindex="0" aria-label="A shared orbital pond"></canvas>
+    <canvas id="pond-fallback" tabindex="0" aria-label="A simplified shared orbital pond" hidden></canvas>
 
-  <!-- Brand wordmark -->
-  <div id="brand">eternal&nbsp;pond<span class="brand-dim"> · 3D</span></div>
+    <header class="world-header">
+      <h1>eternal pond</h1>
+      <p id="presence" aria-live="polite">the pond is listening</p>
+    </header>
 
-  <!-- 3D canvas -->
-  <canvas id="pond3d"></canvas>
-
-  <!-- Toolbar -->
-  <div id="toolbar">
-    <button class="tool-btn active" data-tool="wave" data-tip="Wave"><span class="tool-ico">🌊</span></button>
-    <button class="tool-btn" data-tool="fish" data-tip="Fish"><span class="tool-ico">🐟</span></button>
-    <button class="tool-btn" data-tool="frog" data-tip="Frog"><span class="tool-ico">🐸</span></button>
-    <button class="tool-btn" data-tool="dragonfly" data-tip="Dragonfly"><span class="tool-ico">🪰</span></button>
-    <button class="tool-btn" data-tool="lily" data-tip="Lily Pad"><span class="tool-ico">🌿</span></button>
-    <button class="tool-btn" data-tool="plankton" data-tip="Plankton Pack"><span class="tool-ico">✨</span></button>
-  </div>
-
-  <!-- Event banner -->
-  <div id="event-banner"></div>
-
-  <!-- Toast feed -->
-  <div id="toast-container"></div>
-
-  <!-- Welcome card: one quiet confirmation that your fish entered the shared pond -->
-  <div id="welcome-card">
-    <div class="welcome-glyph">🐟</div>
-    <div class="welcome-text">
-      <div class="welcome-title">your fish has joined the pond</div>
-      <div class="welcome-sub">it stays here, swimming, even after you leave</div>
+    <div class="world-actions">
+      <button id="camera-button" class="icon-button" type="button" aria-label="Ride your fish" title="Ride your fish" hidden>
+        <svg class="camera-ride" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+        <svg class="camera-overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 3 6 6-6 6"/><path d="M21 9H9a6 6 0 0 0-6 6v6"/></svg>
+      </button>
+      <button id="sound-button" class="icon-button" type="button" aria-label="Turn pond sound on" title="Sound">
+        <svg class="sound-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+        <svg class="sound-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/></svg>
+      </button>
+      <button id="ledger-button" class="icon-button" type="button" aria-label="Open the living ledger" title="Living ledger" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z"/></svg>
+      </button>
     </div>
-  </div>
 
-  <!-- Respawn modal -->
-  <div id="respawn-banner">
-    <div class="respawn-card">
-      <div class="respawn-glyph">🐟</div>
-      <div class="respawn-title">your fish has faded</div>
-      <div id="respawn-lifetime"></div>
-      <div class="respawn-subtitle">the pond awaits a new ripple</div>
-      <button id="respawn-btn">spawn a fish</button>
+    <div id="labels" class="labels" aria-hidden="true"></div>
+    <p id="birth-cue" class="birth-cue" hidden>touch the water</p>
+    <p id="queue-state" class="queue-state" aria-live="polite" hidden></p>
+    <p id="pond-notice" class="pond-notice" aria-live="polite" hidden></p>
+    <p id="connection-state" class="connection-state" aria-live="polite">reaching the shared water</p>
+
+    <div id="offering-menu" class="offering-menu" role="menu" aria-label="Leave an offering" hidden>
+      <button type="button" data-offering="food" role="menuitem" aria-label="Offer food" title="Offer food">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 12c2-4 6.5-5.5 11-2.5l3-2v9l-3-2c-4.5 3-9 1.5-11-2.5Z"/><circle cx="15" cy="11" r=".6" fill="currentColor" stroke="none"/><path d="M6.5 12 3 9v6z"/></svg>
+      </button>
+      <button type="button" data-offering="seed" role="menuitem" aria-label="Offer a seed" title="Offer a seed">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 20h10"/><path d="M12 20v-9"/><path d="M12 11C8 11 5 8 5 4c4 0 7 3 7 7Z"/><path d="M12 14c4 0 7-3 7-7-4 0-7 3-7 7Z"/></svg>
+      </button>
     </div>
-  </div>
 
-  <!-- User / profile panel -->
-  <div id="user-panel">
-    <div class="panel-header">
-      <span class="panel-title">pond dwellers</span>
-      <button id="user-panel-close" aria-label="close">✕</button>
+    <aside id="ledger" class="ledger" aria-labelledby="ledger-title" hidden>
+      <div class="ledger-heading">
+        <div>
+          <p class="ledger-kicker">living ledger</p>
+          <h2 id="ledger-title">the pond remembers</h2>
+        </div>
+        <button id="ledger-close" class="icon-button" type="button" aria-label="Close the living ledger" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <dl class="ledger-facts">
+        <div><dt>your soul</dt><dd id="ledger-name">still arriving</dd></div>
+        <div><dt>lineage</dt><dd id="ledger-lineage">no completed lives</dd></div>
+        <div><dt>live souls</dt><dd id="ledger-souls">one quiet witness</dd></div>
+        <div><dt>pond age</dt><dd id="ledger-age">newly remembered</dd></div>
+        <div><dt>founding ripples</dt><dd id="ledger-ripples">149</dd></div>
+        <div><dt>water</dt><dd id="ledger-capacity">open</dd></div>
+      </dl>
+      <div class="ledger-access">
+        <label><span>reduced motion</span><input id="reduced-motion" type="checkbox"></label>
+        <label><span>larger labels</span><input id="larger-labels" type="checkbox"></label>
+      </div>
+      <div class="ledger-memories">
+        <p>recently held in the dome</p>
+        <ol id="memory-list"></ol>
+      </div>
+    </aside>
+
+    <div id="loading-screen">
+      <div class="loading-ripple"></div>
+      <div class="loading-ripple loading-ripple-2"></div>
+      <div class="loading-title">eternal pond</div>
+      <div class="loading-sub">a quiet world, shared</div>
+      <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+      <div class="loading-status">summoning the water...</div>
     </div>
-    <div class="panel-body">
-      <div id="panel-streak"></div>
-      <div id="panel-stats"></div>
-      <div class="panel-section-label">achievements</div>
-      <div id="panel-achievements"></div>
-      <div class="panel-section-label">who's here</div>
-      <div id="user-list"></div>
-    </div>
-  </div>
-  <div id="panel-backdrop"></div>
+  </main>
 
-  <!-- Status bar -->
-  <div id="status-bar">
-    <span id="online-count">connecting…</span>
-    <span id="session-timer">00:00</span>
-    <span id="fish-age"></span>
-    <span id="fish-lives">… fish lives lived</span>
-    <button id="mute-btn" aria-label="toggle sound" title="toggle sound">🔊</button>
-    <span id="hint">tap the water · drag to look around</span>
-  </div>
-
-  <!-- Three.js r128 (pinned, version-matched core + examples) -->
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="pond3d.js"></script>
+  <script src="pond-client-v2.js"></script>
+  <script src="pond-ui.js"></script>
+  <script src="pond-canvas-v2.js"></script>
+  <script src="pond-boot.js"></script>
 </body>
 </html>

@@ -45,7 +45,7 @@ const LOW_QUALITY = IS_MOBILE;
 
 // Entity caps — identical tuning to the 2D pond
 const MAX_CREATURES = 80;
-const MAX_RIPPLES = 120;
+const MAX_RIPPLES = LOW_QUALITY ? 48 : 96;
 const MAX_LILIES = 40;
 const MAX_WAVES = 30;
 const MAX_BIRDS = LOW_QUALITY ? 18 : 36;
@@ -153,7 +153,13 @@ function toWorldZ(y) { return (y - H / 2) * POS_SCALE; }
 
 // ===== THREE.JS CORE =====
 const canvas = document.getElementById('pond3d');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+} catch (error) {
+  window.__pondWebGLFailure = error;
+  throw error;
+}
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW_QUALITY ? 1.0 : 1.25));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
@@ -473,6 +479,28 @@ function disturbWater(x, y, strength, radius) {
   v.set(wx, wz, waterUniforms.uTime.value, s);
 }
 
+function sampleWaterHeight(wx, wz, time) {
+  const t = Number.isFinite(time) ? time : waterUniforms.uTime.value;
+  let height = Math.sin(wx * 0.060 + t * 1.10) * 0.06
+    + Math.sin(wz * 0.052 - t * 0.92) * 0.06
+    + Math.sin((wx + wz) * 0.044 + t * 0.70) * 0.04
+    + Math.cos(wx * 0.115 - wz * 0.093 + t * 1.45) * 0.02;
+  for (const ripple of waterUniforms.uRipples.value) {
+    if (ripple.w <= 0.001) continue;
+    const age = t - ripple.z;
+    if (age < 0 || age > 4.5) continue;
+    const distance = Math.hypot(wx - ripple.x, wz - ripple.y);
+    const radius = age * 26;
+    const band = distance - radius;
+    const envelope = Math.exp(-age * 0.9) * Math.exp(-Math.abs(band) * 0.22) * Math.exp(-distance * 0.012);
+    height += Math.sin(band * 0.9) * envelope * ripple.w * 3.2;
+  }
+  const radius = Math.hypot(wx, wz);
+  const edgeRaw = THREE.MathUtils.clamp((radius - (R_SHORE - 18)) / 18, 0, 1);
+  const edge = 1 - edgeRaw * edgeRaw * (3 - 2 * edgeRaw);
+  return height * edge;
+}
+
 // NOTE: the pond basin + banks are now one continuous terrain bowl built
 // in buildEnvironment() (see buildTerrain), so there is no separate flat
 // floor — the water genuinely sits in a hole that flows up onto land.
@@ -509,7 +537,6 @@ const ASSETS = {
   flowers: 'assets/flowers.glb',
   bushes: 'assets/bushes.glb',
   flower_bushes: 'assets/flower_bushes.glb',
-  scifibuilding: 'assets/scifibuilding.glb',
   sun: 'assets/ps1_style_low_poly_sun.glb',
   earth: 'assets/ps1_style_low_poly_earth.glb',
   moon: 'assets/ps1_style_low_poly_moon.glb',
@@ -556,6 +583,25 @@ function stdMat(color, opts = {}) {
   return new THREE.MeshStandardMaterial(Object.assign({
     color, roughness: 0.6, metalness: 0.05,
   }, opts));
+}
+
+let creatureHaloTexture = null;
+function makeCreatureHalo(color, scale) {
+  if (!creatureHaloTexture) creatureHaloTexture = makeGlowSprite();
+  const material = new THREE.SpriteMaterial({
+    map: creatureHaloTexture,
+    color,
+    transparent: true,
+    opacity: 0.28,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+  });
+  const halo = new THREE.Sprite(material);
+  halo.scale.setScalar(scale || 4.2);
+  halo.userData.baseOpacity = material.opacity;
+  return halo;
 }
 
 function makeBlobShadow(radius) {
@@ -605,12 +651,14 @@ function buildFish(color, tier) {
 
   let glow = null;
   if (tier >= 3) {
-    glow = new THREE.PointLight(col.getHex(), 0.9, 14, 2);
+    glow = makeCreatureHalo(col.getHex(), 4.2);
     g.add(glow);
-    bodyMat.emissive = col.clone().multiplyScalar(0.5);
+    bodyMat.emissive.copy(col).multiplyScalar(0.5);
   }
 
-  g.userData = { tail: tailPivot, body, materials: [bodyMat, tail.material, dorsal.material], glow };
+  const materials = [bodyMat, tail.material, dorsal.material];
+  if (glow) materials.push(glow.material);
+  g.userData = { tail: tailPivot, body, materials, glow };
   return g;
 }
 
@@ -618,7 +666,11 @@ function buildFish(color, tier) {
 // Swimming pose: torpedo body lying belly-down with the head along +X (the
 // axis sync3D yaws toward the swim direction), white tummy, swept-back
 // flippers, and paddling feet on a rear pivot that wags like a fish tail.
-function buildPenguin(color) {
+const PENGUIN_PROTOTYPES = new Map();
+const PENGUIN_COLORS = ['#9b5de5', '#ffe66d'];
+let legendaryWarmInstances = [];
+
+function createPenguinPrototype(color) {
   const g = new THREE.Group();
   const col = new THREE.Color(color);
   const coat = stdMat(0x1c2430, { roughness: 0.5, metalness: 0.05, emissive: col.clone().multiplyScalar(0.18).getHex() });
@@ -626,6 +678,7 @@ function buildPenguin(color) {
   const orange = stdMat(0xe8933a, { roughness: 0.5 });
 
   const body = new THREE.Mesh(geo('pengBody', () => new THREE.SphereGeometry(1, 18, 14)), coat);
+  body.name = 'legendary-body';
   body.scale.set(1.3, 0.62, 0.55); g.add(body);
 
   // white belly
@@ -678,6 +731,7 @@ function buildPenguin(color) {
 
   // paddling feet + stubby tail on a rear pivot — sync3D wags it like a tail
   const tailPivot = new THREE.Group(); tailPivot.position.set(-1.1, -0.12, 0);
+  tailPivot.name = 'legendary-tail';
   for (const s of [-1, 1]) {
     const foot = new THREE.Mesh(geo('pengFoot', () => new THREE.SphereGeometry(0.16, 8, 6)), orange);
     foot.scale.set(1.7, 0.35, 0.9);
@@ -690,11 +744,62 @@ function buildPenguin(color) {
   g.add(tailPivot);
 
   // legendary glow — same treatment as a tier-3 procedural fish
-  const glow = new THREE.PointLight(col.getHex(), 0.9, 14, 2);
+  const glow = makeCreatureHalo(col.getHex(), 4.8);
+  glow.name = 'legendary-glow';
   g.add(glow);
 
-  g.userData = { tail: tailPivot, body, materials: [coat, tummyMat, orange, eyeWhite, eyeBlack], glow };
-  return g;
+  const box = new THREE.Box3().setFromObject(g);
+  const size = new THREE.Vector3(); box.getSize(size);
+  g.scale.setScalar(1 / (Math.max(size.x, size.y, size.z) || 1));
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  wrap.userData.normalizedPenguin = true;
+  return wrap;
+}
+
+function clonePrototypeMaterials(root) {
+  const clones = new Map();
+  root.traverse((node) => {
+    if (!node.material) return;
+    if (Array.isArray(node.material)) {
+      node.material = node.material.map((material) => {
+        if (!clones.has(material)) clones.set(material, material.clone());
+        return clones.get(material);
+      });
+      return;
+    }
+    if (!clones.has(node.material)) clones.set(node.material, node.material.clone());
+    node.material = clones.get(node.material);
+  });
+}
+
+function buildPenguin(color) {
+  const key = new THREE.Color(color).getHexString();
+  if (!PENGUIN_PROTOTYPES.has(key)) PENGUIN_PROTOTYPES.set(key, createPenguinPrototype(color));
+  const root = PENGUIN_PROTOTYPES.get(key).clone(true);
+  clonePrototypeMaterials(root);
+  const tail = root.getObjectByName('legendary-tail');
+  const body = root.getObjectByName('legendary-body');
+  const glow = root.getObjectByName('legendary-glow');
+  const materials = [];
+  root.traverse((node) => {
+    if (!node.material) return;
+    const list = Array.isArray(node.material) ? node.material : [node.material];
+    for (const material of list) if (!materials.includes(material)) materials.push(material);
+  });
+  root.userData = { normalizedPenguin: true, tail, body, materials, glow };
+  return root;
+}
+
+function prewarmLegendaryFish() {
+  legendaryWarmInstances = PENGUIN_COLORS.map((color) => buildPenguin(color));
+  for (const warm of legendaryWarmInstances) {
+    warm.position.set(0, -1000, 0);
+    scene.add(warm);
+  }
+  try { renderer.compile(scene, camera); }
+  catch (error) { console.warn('legendary fish shader warm-up failed', error); }
+  for (const warm of legendaryWarmInstances) scene.remove(warm);
 }
 
 // ---------- PROCEDURAL FROG ----------
@@ -714,14 +819,51 @@ function buildFrog() {
   // eyes (bumps + balls)
   const eyeW = new THREE.MeshStandardMaterial({ color: 0xfdfdf0, roughness: 0.3 });
   const eyeB = new THREE.MeshStandardMaterial({ color: 0x0a0f06, roughness: 0.2 });
+  const eyeGroups = [];
   for (const s of [-1, 1]) {
+    const eyeGroup = new THREE.Group();
+    g.add(eyeGroup);
     const bump = new THREE.Mesh(geo('frogEyeBump', () => new THREE.SphereGeometry(0.34, 12, 10)), skin);
-    bump.position.set(0.45, 0.62, s * 0.42); g.add(bump);
+    bump.position.set(0.45, 0.62, s * 0.42); eyeGroup.add(bump);
     const w = new THREE.Mesh(geo('frogEyeW', () => new THREE.SphereGeometry(0.2, 10, 8)), eyeW);
-    w.position.set(0.6, 0.74, s * 0.44); g.add(w);
+    w.position.set(0.6, 0.74, s * 0.44); eyeGroup.add(w);
     const b = new THREE.Mesh(geo('frogEyeB', () => new THREE.SphereGeometry(0.1, 8, 6)), eyeB);
-    b.position.set(0.72, 0.76, s * 0.46); g.add(b);
+    b.position.set(0.72, 0.76, s * 0.46); eyeGroup.add(b);
+    eyeGroups.push(eyeGroup);
   }
+
+  const mouthCurve = new THREE.QuadraticBezierCurve3(
+    new THREE.Vector3(0.91, 0.2, -0.43),
+    new THREE.Vector3(1.03, 0.08, 0),
+    new THREE.Vector3(0.91, 0.2, 0.43)
+  );
+  const mouthLine = new THREE.Mesh(
+    new THREE.TubeGeometry(mouthCurve, 18, 0.025, 6, false),
+    new THREE.MeshStandardMaterial({ color: 0x172016, roughness: 0.72 })
+  );
+  g.add(mouthLine);
+
+  const lowerJaw = new THREE.Group();
+  lowerJaw.position.set(0.63, 0.12, 0);
+  const mouthInterior = new THREE.Mesh(
+    geo('frogMouthInterior', () => new THREE.SphereGeometry(1, 14, 8)),
+    new THREE.MeshStandardMaterial({ color: 0xc64e68, roughness: 0.58 })
+  );
+  mouthInterior.position.set(0.32, -0.01, 0);
+  mouthInterior.scale.set(0.13, 0.08, 0.39);
+  lowerJaw.add(mouthInterior);
+  const lowerLip = new THREE.Mesh(
+    geo('frogLowerLip', () => new THREE.SphereGeometry(1, 12, 6)),
+    darker
+  );
+  lowerLip.position.set(0.32, -0.075, 0);
+  lowerLip.scale.set(0.12, 0.055, 0.4);
+  lowerJaw.add(lowerLip);
+  g.add(lowerJaw);
+
+  const tongueAnchor = new THREE.Object3D();
+  tongueAnchor.position.set(1.02, 0.13, 0);
+  g.add(tongueAnchor);
 
   // legs (tucked)
   for (const s of [-1, 1]) {
@@ -731,7 +873,15 @@ function buildFrog() {
     foot.scale.set(1.6, 0.4, 1.1); foot.position.set(0.55, -0.55, s * 0.7); g.add(foot);
   }
 
-  g.userData = { body, materials: [skin, darker, sheen.material] };
+  g.userData = {
+    body,
+    eyeGroups,
+    mouthLine,
+    mouthInterior,
+    lowerJaw,
+    tongueAnchor,
+    materials: [skin, darker, sheen.material, mouthLine.material, mouthInterior.material],
+  };
   return g;
 }
 
@@ -1117,7 +1267,7 @@ class Fish3D {
     const glb = !isLegendary && assetCache.fish ? instantiateGLB('fish') : null;
     this.model = glb ? glb.root : (isLegendary ? buildPenguin(this.color) : buildFish(this.color, this.tier));
     this.mixer = glb ? glb.mixer : null;
-    this.mesh = unitWrap(this.model);
+    this.mesh = this.model.userData.normalizedPenguin ? this.model : unitWrap(this.model);
     this.mesh.rotation.y = -this.angle;
     scene.add(this.mesh);
     this.nameSprite = null;
@@ -1254,7 +1404,12 @@ class Fish3D {
     this.mesh.scale.setScalar(s);
     if (this.mixer) this.mixer.update(dt * 0.016);
     else if (this.model.userData.tail) this.model.userData.tail.rotation.y = Math.sin(this.tailPhase) * 0.5;
-    if (this.model.userData.glow) this.model.userData.glow.intensity = 0.7 + Math.sin(this.tailPhase * 0.5) * 0.3;
+    if (this.model.userData.glow) {
+      const glow = this.model.userData.glow;
+      const pulse = 0.82 + Math.sin(this.tailPhase * 0.5) * 0.18;
+      if (glow.isSprite) glow.material.opacity = glow.userData.baseOpacity * pulse;
+      else glow.intensity = 0.7 + Math.sin(this.tailPhase * 0.5) * 0.3;
+    }
     const fade = this.life < 0.3 ? this.life / 0.3 : 1;
     if (fade < 1) setGroupOpacity(this.model, fade);
     // invulnerability visual: pulsing emissive glow
@@ -2134,6 +2289,7 @@ function makeWillowTree(scale, glow) {
 
 const TREE_GLB_KEYS = ['tree_pine', 'tree_birch', 'tree_maple', 'tree_oak', 'tree_autumn'];
 const TREE_BUILDERS = [makePineTree, makeOakTree, makeBirchTree, makeWillowTree];
+const TREE_PERCHES = [];
 let treeTypeCounter = 0;
 
 function makeTree(scale, glow) {
@@ -2212,6 +2368,12 @@ function buildEnvironment() {
     tree.position.set(Math.cos(a) * r, terrainHeight(r) - treeBox.min.y - 0.6, Math.sin(a) * r);
     tree.rotation.y = Math.random() * 6.28;
     forest.add(tree);
+    const inward = Math.min(3.5, treeH * 0.08);
+    TREE_PERCHES.push(new THREE.Vector3(
+      tree.position.x - Math.cos(a) * inward,
+      tree.position.y + treeBox.max.y * 0.68,
+      tree.position.z - Math.sin(a) * inward
+    ));
     if (glow && lightsPlaced < faerieLights) {
       const pl = new THREE.PointLight(lightCols[lightsPlaced % lightCols.length], 0.95, 90, 2);
       pl.position.set(tree.position.x, tree.position.y + tree.userData.topY * 0.8, tree.position.z);
@@ -2529,7 +2691,83 @@ function buildCelestials() {
 // Place scifibuilding.glb in a uniform L-shape around 2 corners of the map,
 // far outside the dome on the outer edges. Massive structures visible from
 // inside the dome through the transparent shell.
+function buildOrbitalVillage() {
+  const village = new THREE.Group();
+  village.name = 'orbital-village';
+  const concrete = stdMat(0x81939a, { roughness: 0.86, metalness: 0.05, flatShading: true });
+  const concreteDark = stdMat(0x42545b, { roughness: 0.9, metalness: 0.08, flatShading: true });
+  const roofMat = stdMat(0x253d45, { roughness: 0.78, metalness: 0.16, flatShading: true });
+  const accentMat = stdMat(0x5ea99a, { roughness: 0.68, metalness: 0.12, flatShading: true });
+  const windowMat = new THREE.MeshBasicMaterial({ color: 0xe8c477, fog: false });
+  const boxGeometry = geo('villageBox', () => new THREE.BoxGeometry(1, 1, 1));
+  const mastGeometry = geo('villageMast', () => new THREE.CylinderGeometry(0.35, 0.55, 1, 6));
+  const plots = [
+    { x: -344, z: -112, w: 58, d: 43, h: 72, upper: 0.62, accent: 'left' },
+    { x: -405, z: -78, w: 42, d: 38, h: 48, upper: 0.44, accent: 'roof' },
+    { x: -365, z: -38, w: 50, d: 46, h: 58, upper: 0.52, accent: 'right' },
+    { x: -430, z: -20, w: 64, d: 48, h: 86, upper: 0.68, accent: 'mast' },
+  ];
+
+  for (let index = 0; index < plots.length; index++) {
+    const plot = plots[index];
+    const building = new THREE.Group();
+    const radius = Math.hypot(plot.x, plot.z);
+    building.position.set(plot.x, terrainHeight(radius), plot.z);
+    building.rotation.y = Math.atan2(-plot.x, -plot.z);
+
+    const base = new THREE.Mesh(boxGeometry, index % 2 ? concreteDark : concrete);
+    base.scale.set(plot.w, plot.h, plot.d);
+    base.position.y = plot.h * 0.5;
+    building.add(base);
+
+    const upperHeight = plot.h * plot.upper;
+    const upper = new THREE.Mesh(boxGeometry, index % 2 ? concrete : concreteDark);
+    upper.scale.set(plot.w * 0.58, upperHeight, plot.d * 0.62);
+    upper.position.set((index % 2 ? -1 : 1) * plot.w * 0.12, plot.h + upperHeight * 0.5, -plot.d * 0.04);
+    building.add(upper);
+
+    const roof = new THREE.Mesh(boxGeometry, roofMat);
+    roof.scale.set(plot.w * 0.72, 3.2, plot.d * 0.78);
+    roof.position.set(upper.position.x, plot.h + upperHeight + 1.6, upper.position.z);
+    building.add(roof);
+
+    const stripe = new THREE.Mesh(boxGeometry, accentMat);
+    stripe.scale.set(plot.w * 0.12, plot.h * 0.72, plot.d + 0.8);
+    stripe.position.set(plot.accent === 'left' ? -plot.w * 0.34 : plot.w * 0.34, plot.h * 0.5, 0);
+    building.add(stripe);
+
+    const rows = Math.max(2, Math.floor(plot.h / 18));
+    for (let row = 0; row < rows; row++) {
+      for (const side of [-1, 1]) {
+        const pane = new THREE.Mesh(boxGeometry, windowMat);
+        pane.scale.set(plot.w * 0.18, 3.2, 0.6);
+        pane.position.set(side * plot.w * 0.23, 12 + row * 15, plot.d * 0.505);
+        building.add(pane);
+      }
+    }
+
+    if (plot.accent === 'mast') {
+      const mast = new THREE.Mesh(mastGeometry, accentMat);
+      mast.scale.y = 28;
+      mast.position.set(upper.position.x, plot.h + upperHeight + 17, upper.position.z);
+      building.add(mast);
+      const beacon = new THREE.Mesh(
+        geo('villageBeacon', () => new THREE.IcosahedronGeometry(1.8, 1)),
+        new THREE.MeshBasicMaterial({ color: 0x9edbd0, fog: false })
+      );
+      beacon.position.set(mast.position.x, mast.position.y + 15, mast.position.z);
+      building.add(beacon);
+    }
+
+    village.add(building);
+  }
+
+  scene.add(village);
+}
+
 function buildSciFiBuildings() {
+  buildOrbitalVillage();
+  return;
   if (!assetCache.scifibuilding) return;
   const BUILDING_SCALE = 120; // massive — visible from inside the dome
   const SPACING = 380; // uniform spacing between buildings
@@ -2658,6 +2896,10 @@ function updateFireflies(t) {
 // ===================================================================
 // INPUT — raycast taps create actions; drags orbit the camera
 // ===================================================================
+// The original interaction, retention, and V1 network layer is retained as
+// historical reference but is no longer executed. pond-runtime-v2.js owns
+// input, canonical state, lifecycle, labels, and camera behavior.
+function archivedLegacyInteractionLayer() {
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -3554,8 +3796,74 @@ function seedInitialLife() {
   if (!myFish && !wsConnected) spawnPlayerFish();
 }
 
+function installLegendaryBenchmark() {
+  const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+  if (!localHosts.has(window.location.hostname)) return;
+
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const countPointLights = () => {
+    let count = 0;
+    scene.traverse((node) => { if (node.isPointLight) count++; });
+    return count;
+  };
+
+  window.__pondDebug = Object.assign(window.__pondDebug || {}, {
+    async benchmarkLegendary(requestedCount) {
+      const count = clamp(Math.round(Number(requestedCount) || 20), 1, 50);
+      const pointLightsBefore = countPointLights();
+      const shaderErrors = [];
+      const spawnTimes = [];
+      let maxFrameGapMs = 0;
+      let previousFrame = await nextFrame();
+      const originalConsoleError = console.error;
+      console.error = function (...args) {
+        if (/shader|program|webgl/i.test(args.map(String).join(' '))) shaderErrors.push(args.map(String).join(' '));
+        originalConsoleError.apply(console, args);
+      };
+
+      try {
+        for (let i = 0; i < count; i++) {
+          const spawnStarted = performance.now();
+          const point = randomPondPoint(R_WATER * 0.62);
+          const fish = addCreature('fish', point.x, point.y, { tier: 3 }, true);
+          fish.__legendaryBenchmark = true;
+          spawnTimes.push(performance.now() - spawnStarted);
+          const frameTime = await nextFrame();
+          maxFrameGapMs = Math.max(maxFrameGapMs, frameTime - previousFrame);
+          previousFrame = frameTime;
+        }
+        const finalFrame = await nextFrame();
+        maxFrameGapMs = Math.max(maxFrameGapMs, finalFrame - previousFrame);
+      } finally {
+        console.error = originalConsoleError;
+      }
+
+      const pointLightsAfter = countPointLights();
+      for (let i = creatures.length - 1; i >= 0; i--) {
+        if (!creatures[i].__legendaryBenchmark) continue;
+        creatures[i].destroy();
+        creatures.splice(i, 1);
+      }
+      const thresholdMs = IS_MOBILE ? 150 : 100;
+      const result = {
+        count,
+        pointLightsAdded: pointLightsAfter - pointLightsBefore,
+        shaderErrors: shaderErrors.length,
+        maxSpawnMs: Math.max(...spawnTimes),
+        maxFrameGapMs,
+        thresholdMs,
+        passed: pointLightsAfter === pointLightsBefore && shaderErrors.length === 0 && maxFrameGapMs <= thresholdMs,
+      };
+      console.table(result);
+      return result;
+    },
+  });
+}
+
 function init() {
   buildEnvironment();
+  prewarmLegendaryFish();
+  installLegendaryBenchmark();
 
   // fish lives counter — fetch global count on load
   fetchFishLives();
@@ -3577,6 +3885,17 @@ function init() {
 
   animate();
 
+  if (new URLSearchParams(window.location.search).get('benchmark') === 'legendary' && window.__pondDebug) {
+    setTimeout(async () => {
+      try {
+        const result = await window.__pondDebug.benchmarkLegendary(20);
+        document.documentElement.dataset.legendaryBenchmark = JSON.stringify(result);
+      } catch (error) {
+        document.documentElement.dataset.legendaryBenchmark = JSON.stringify({ passed: false, error: String(error) });
+      }
+    }, 900);
+  }
+
   // reveal the scene — the first frame has already rendered inside animate(),
   // so this is a short grace beat rather than a blind guess
   setTimeout(hideLoadingScreen, 400);
@@ -3587,3 +3906,4 @@ function init() {
 // any stragglers simply resolve into the asset cache unused-until-next-spawn.
 const assetsReady = Promise.all(Object.entries(ASSETS).map(([k, v]) => loadAsset(k, v)));
 Promise.race([assetsReady, new Promise(res => setTimeout(res, 15000))]).then(init);
+}

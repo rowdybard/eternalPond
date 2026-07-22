@@ -1,4 +1,92 @@
-# 3D Pond — Engineering Guide
+# Eternal Pond - Canonical World and Rendering Guide
+
+This is the active guide for the canonical remaster. It preserves Fable's authored low-poly orbital pond and layers synchronized nature, soul persistence, and sparse multiplayer state into that scene. Fable's original implementation guide remains intact under **Historical Reference** below.
+
+## 1. Runtime map
+
+```text
+frontend/index.html                Authored page shell and minimal controls
+frontend/pond3d.js                 Fable scene, water, dome, assets, procedural models
+frontend/pond-runtime-v2.js        Protocol-3 scene adapter, interpolation, nature, camera
+frontend/pond-client-v2.js         Identity, reconnect, clock sync, ripple batching
+frontend/pond-ui.js                Wordmark, presence, camera control, hidden ledger
+frontend/pond-canvas-v2.js         Live protocol-3 spectator fallback
+frontend/pond-boot.js              WebGL startup and explicit fallback selection
+v2/shared/src/index.ts             Protocol 3 and shared deterministic helpers
+v2/worker/src/core.ts              Canonical ecology and SQLite persistence
+v2/worker/src/gateway.ts           16 hibernating WebSocket fan-out shards
+v2/worker/src/simulation.ts        Movement, lifespans, predation, fast-forward
+v2/worker/src/queue.ts             Returning-life priority and FIFO birth queue
+```
+
+`PondCoreV2`, `PondGatewayV2`, and the `-v2.js` filenames retain their names for Durable Object and asset compatibility. They now implement protocol 3. The standalone `v2/web` remake was discarded after its useful systems were transplanted into the authored frontend.
+
+## 2. Authority and timing
+
+- The core is the sole ecology authority. Clients interpolate motions and render nature events; they do not invent wildlife or decide life transitions.
+- Foreground simulation runs at 10 Hz and publishes compact `upserts`, `motions`, `hiddenIds`, and true `removedIds` at 5 Hz.
+- Critical transitions persist immediately; active simulation checkpoints every 15 seconds.
+- The 60-minute orbit derives from server time and influences celestials, light, water, fireflies, activity, and audio.
+- Disconnected fish remain canonical but compact into background cohort metadata. Cohort counts are never expanded into rendered fish.
+
+## 3. Sparse ecology
+
+- The world seeds 48 wild fish, 6 birds, 2 frogs, and 5 permanent baseline lilies.
+- Ordinary idle exposes only 0-3 existing wild fish. Food may surface up to 6 for 60 seconds.
+- Birds rotate through real circling, shoreline-foraging, and code-owned perch roles. A synchronized hunt occurs every 12-18 minutes.
+- Frogs move among water, lilies, shore, forest, and facility ground. A synchronized catch grows a frog by `0.3` to a `3x` cap and drives its mouth, tongue, bite, chew, blink, and body pulse.
+- Visitor lilies are canonical, deterministic, opaque, water-height anchored, and limited to 24 active pads. Baseline pads are never replaced.
+- One hitch-safe legendary penguin may appear under rare synchronized conditions. It uses cached geometry, emissive materials, and an additive halo, never a light.
+
+## 4. Interaction and cameras
+
+- The first water contact renders a local ripple immediately and requests incarnation at a server-sampled point. Birth remains in the overview.
+- Later taps always render locally. Points collect for 100 ms into `rippleBatch` messages of at most 12 points and at most 10 batches per second.
+- Holds after birth open Food and Seed. The nine-pixel drag cancellation threshold protects camera movement.
+- Tap the owned fish, press `C`, or use the camera icon to toggle Ride and Overview.
+- Ride follows world position with a spring and manual world bearing without inheriting fish heading. Returning living souls resume in Ride.
+- Canvas fallback users share presence, orbit, entities, memories, and ripples as spectators but cannot incarnate or offer.
+
+## 5. Rendering invariants
+
+- `pond3d.js` owns the authored water and environment. The canonical runtime feeds server time and bounded disturbances into it rather than replacing its visual language.
+- Every local tap gets a pooled visible ring: 96 desktop, 48 mobile. Only the strongest bounded disturbances reach the shader and rapid sounds blend.
+- Lilies keep opaque materials and depth writing at every lifecycle stage. Aging uses color, scale, flower closure, and sinking, never alpha.
+- CPU water-height sampling keeps pads and frogs aligned with the displaced surface.
+- Fish labels stay permanent for the visitor, visible nearby, and condense into school counts when distant overlaps become unreadable.
+- Never add per-creature lights. Changing the active Three.js light shape can trigger broad shader recompilation.
+
+## 6. Capacity and protocol
+
+- Protocol 3 uses `/ws/v3` and `/api/v3/status`; `/v2` aliases remain during migration.
+- Capacity is 128 embodied souls with FIFO spectator overflow and returning-life priority.
+- The live local harness passed 100 simultaneous wavers with 1,000 ripple batches and 128 clients with 127 embodied plus one queued spectator alongside the real preview soul.
+- Opaque tokens stay in local storage while only token hashes persist server-side. Generated names remove public free text.
+- `lifeKind: mortal | memorial` and memorial ownership fields are reserved; payments are not implemented.
+
+## 7. Local verification
+
+```powershell
+npm install
+npm run dev:v2:worker
+npm run dev:web
+npm run check:v2
+npm run test:v2
+npm run build:v2
+$env:POND_LOAD_WAVES='1'; $env:POND_ALLOW_PERSISTENT_LOAD='1'; npm run load:v2 -- 100
+```
+
+- Web preview: `http://127.0.0.1:5173/`
+- Worker status: `http://127.0.0.1:8787/api/v3/status`
+- Canvas spectator: `http://127.0.0.1:5173/?renderer=canvas`
+- Legendary benchmark: `http://127.0.0.1:5173/?benchmark=legendary`
+- Bird and frog visual diagnostics: `?event=birds` and `?event=frogs`
+
+The diagnostics are localhost-only and never mutate shared ecology. Do not run the live load harness against production; use an isolated preview Durable Object.
+
+---
+
+# Historical Reference: Fable's Original 3D Pond
 
 > A complete orientation for an AI agent (or human) tasked with understanding, modifying, or extending the **Eternal Pond** 3D experience. Read this top‑to‑bottom once before touching code. The single most important section is **[The Three Coordinate Spaces](#1-the-three-coordinate-spaces-read-this-first)** — almost every bug comes from confusing them.
 
