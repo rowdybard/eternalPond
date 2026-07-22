@@ -1543,6 +1543,7 @@
     queued = false;
     ui.showBirthCue(!client.ownedEntityId);
     ui.setCameraAvailable(!!client.ownedEntityId && entities.tracked.has(client.ownedEntityId));
+    if (client.ownedEntityId) ui.awaken();
     if (returningEntityId && client.ownedEntityId === returningEntityId && !resumedReturningFish) {
       resumedReturningFish = true;
       stableCamera.enterRide();
