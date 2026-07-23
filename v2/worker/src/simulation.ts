@@ -7,6 +7,7 @@ import {
   type EntityKind,
   type EntityState,
   type LifeKind,
+  type NormalizedPoint,
 } from "@eternal-pond/shared";
 
 export interface SimEntity extends EntityState {
@@ -31,6 +32,14 @@ export interface CreateSoulFishInput {
 
 const TAU = Math.PI * 2;
 
+export interface BirdLifecycleTiming {
+  flightMs: number;
+  approachMs: number;
+  restMs: number;
+  takeoffMs: number;
+  cycleMs: number;
+}
+
 export const BIRD_PERCH_ANCHORS = [
   { x: 0.12, z: 0.12 }, { x: 0.88, z: 0.1 }, { x: 0.98, z: 0.62 },
   { x: 0.18, z: 0.94 }, { x: 0.02, z: 0.62 }, { x: 0.72, z: 0.97 },
@@ -46,6 +55,15 @@ export const LILY_BASELINE_ANCHORS = [
   { x: 0.28, z: 0.39 }, { x: 0.64, z: 0.34 }, { x: 0.72, z: 0.59 },
   { x: 0.42, z: 0.7 }, { x: 0.2, z: 0.57 },
 ] as const;
+
+export function birdLifecycleTiming(seed: number): BirdLifecycleTiming {
+  const random = mulberry32(seed ^ 0xb17d1e5);
+  const flightMs = 22_000 + Math.floor(random() * 13_001);
+  const approachMs = 4_000 + Math.floor(random() * 1_001);
+  const restMs = 10_000 + Math.floor(random() * 8_001);
+  const takeoffMs = 3_000 + Math.floor(random() * 1_001);
+  return { flightMs, approachMs, restMs, takeoffMs, cycleMs: flightMs + approachMs + restMs + takeoffMs };
+}
 
 export function lifespanForSeed(seed: number): number {
   const random = mulberry32(seed ^ 0x9e3779b9);
@@ -108,17 +126,19 @@ export function createWildEntity(kind: EntityKind, index: number, now: number): 
   } else if (kind === "bird") {
     const mode = (["circling", "foraging", "perched"] as const)[index % 3] ?? "circling";
     const targetAnchor = index % BIRD_PERCH_ANCHORS.length;
-    state = { mode, targetAnchor };
-    if (mode === "perched") {
-      const anchor = BIRD_PERCH_ANCHORS[targetAnchor] ?? BIRD_PERCH_ANCHORS[0];
-      x = anchor.x;
-      z = anchor.z;
-    } else {
-      const movementRadius = mode === "foraging" ? 0.472 : 0.34 + ((seed >>> 6) % 55) / 1000;
-      const movementAngle = (now / 1000) * (mode === "foraging" ? 0.018 + defaults.speed * 2 : 0.055 + defaults.speed * 6) + (seed % 6283) / 1000;
-      x = 0.5 + Math.cos(movementAngle) * movementRadius;
-      z = 0.5 + Math.sin(movementAngle) * movementRadius;
-    }
+    const timing = birdLifecycleTiming(seed);
+    const pairOffset = Math.floor(index / 3) % 2;
+    const phaseOffset = mode === "circling"
+      ? timing.flightMs * (pairOffset === 0 ? 0.18 : 0.68)
+      : timing.flightMs + timing.approachMs + timing.restMs * (pairOffset === 0 ? 0.22 : 0.68);
+    state = {
+      mode,
+      targetAnchor,
+      birdCycle: 0,
+      birdRestMode: mode === "perched" ? "perched" : "foraging",
+      birdLifecycleAt: now - phaseOffset,
+      birdFlightAngle: (seed % 6283) / 1000,
+    };
   } else if (kind === "frog") {
     const mode = index % 2 === 0 ? "lily" as const : "shore" as const;
     const targetAnchor = mode === "lily" ? index % 2 : 2 + (index % 2);
@@ -127,7 +147,7 @@ export function createWildEntity(kind: EntityKind, index: number, now: number): 
     z = anchor.z;
     state = { mode, growthScale: 1, feedCount: 0, targetAnchor };
   }
-  return {
+  const entity: SimEntity = {
     id: `wild_${kind}_${index}`,
     kind,
     soulId: null,
@@ -151,6 +171,7 @@ export function createWildEntity(kind: EntityKind, index: number, now: number): 
     seed,
     updatedAt: now,
   };
+  return kind === "bird" ? advanceBirdLifecycle(entity, now) : entity;
 }
 
 function wrapAngle(value: number): number {
@@ -161,42 +182,211 @@ function shortestAngle(from: number, to: number): number {
   return ((to - from + Math.PI * 3) % TAU) - Math.PI;
 }
 
+function smoothstep(value: number): number {
+  const bounded = Math.max(0, Math.min(1, value));
+  return bounded * bounded * (3 - 2 * bounded);
+}
+
+function birdFlightPoint(entity: SimEntity, at: number, lifecycleAt: number, flightAngle: number): NormalizedPoint {
+  const radius = 0.34 + ((entity.seed >>> 6) % 55) / 1000;
+  const angle = flightAngle + Math.max(0, at - lifecycleAt) / 1000 * (0.055 + entity.speed * 6);
+  return { x: 0.5 + Math.cos(angle) * radius, z: 0.5 + Math.sin(angle) * radius };
+}
+
+function birdRestChoice(seed: number, cycle: number): "foraging" | "perched" {
+  return (hashString32(`bird-rest:${seed}:${cycle}`) & 1) === 0 ? "foraging" : "perched";
+}
+
+function birdAnchorIndex(seed: number, cycle: number): number {
+  return hashString32(`bird-anchor:${seed}:${cycle}`) % BIRD_PERCH_ANCHORS.length;
+}
+
+function birdRestPoint(
+  entity: SimEntity,
+  cycle: number,
+  mode: "foraging" | "perched",
+  anchorIndex: number,
+  at: number,
+  restStartedAt: number,
+  restMs: number,
+): NormalizedPoint {
+  if (mode === "perched") return BIRD_PERCH_ANCHORS[anchorIndex] ?? BIRD_PERCH_ANCHORS[0];
+  const variation = ((hashString32(`bird-forage:${entity.seed}:${cycle}`) >>> 8) % 401 - 200) / 1000;
+  const baseAngle = anchorIndex / BIRD_PERCH_ANCHORS.length * TAU + variation;
+  const progress = Math.max(0, Math.min(1, (at - restStartedAt) / Math.max(1, restMs)));
+  const stride = Math.sin(progress * Math.PI * 4) * 0.008;
+  const radius = 0.462 + Math.sin(progress * Math.PI * 2) * 0.004;
+  return {
+    x: 0.5 + Math.cos(baseAngle) * radius - Math.sin(baseAngle) * stride,
+    z: 0.5 + Math.sin(baseAngle) * radius + Math.cos(baseAngle) * stride,
+  };
+}
+
+function legacyBirdLifecycleAt(entity: SimEntity, now: number, timing: BirdLifecycleTiming): number {
+  const mode = entity.state.mode;
+  if (mode === "approaching") return now - timing.flightMs - timing.approachMs * 0.5;
+  if (mode === "foraging" || mode === "perched") return now - timing.flightMs - timing.approachMs - timing.restMs * 0.35;
+  if (mode === "takingOff") return now - timing.flightMs - timing.approachMs - timing.restMs - timing.takeoffMs * 0.5;
+  return now - timing.flightMs * 0.35;
+}
+
+export function advanceBirdLifecycle(entity: SimEntity, now: number): SimEntity {
+  if (entity.kind !== "bird") return { ...entity, state: { ...entity.state }, updatedAt: now };
+  const timing = birdLifecycleTiming(entity.seed);
+  const current = entity.state;
+  let lifecycleAt = Number.isFinite(current.birdLifecycleAt)
+    ? Number(current.birdLifecycleAt)
+    : legacyBirdLifecycleAt(entity, now, timing);
+  const flightAngle = Number.isFinite(current.birdFlightAngle)
+    ? Number(current.birdFlightAngle)
+    : (entity.seed % 6283) / 1000;
+
+  if (current.mode === "takingOff" && lifecycleAt > now && current.transitionFrom && current.transitionTo) {
+    const startedAt = current.transitionStartedAt ?? now;
+    const progress = smoothstep((now - startedAt) / Math.max(1, lifecycleAt - startedAt));
+    const x = current.transitionFrom.x + (current.transitionTo.x - current.transitionFrom.x) * progress;
+    const z = current.transitionFrom.z + (current.transitionTo.z - current.transitionFrom.z) * progress;
+    return {
+      ...entity,
+      x,
+      z,
+      heading: wrapAngle(Math.atan2(current.transitionTo.z - current.transitionFrom.z, current.transitionTo.x - current.transitionFrom.x)),
+      state: { ...current, nextActionAt: lifecycleAt },
+      updatedAt: now,
+    };
+  }
+  if (lifecycleAt > now) lifecycleAt = now;
+
+  const elapsed = Math.max(0, now - lifecycleAt);
+  const cycle = Math.floor(elapsed / timing.cycleMs);
+  const cycleStartedAt = lifecycleAt + cycle * timing.cycleMs;
+  const flightEndsAt = cycleStartedAt + timing.flightMs;
+  const approachEndsAt = flightEndsAt + timing.approachMs;
+  const restEndsAt = approachEndsAt + timing.restMs;
+  const cycleEndsAt = restEndsAt + timing.takeoffMs;
+  const restMode = current.birdCycle === cycle && (current.birdRestMode === "foraging" || current.birdRestMode === "perched")
+    ? current.birdRestMode
+    : birdRestChoice(entity.seed, cycle);
+  const targetAnchor = current.birdCycle === cycle && Number.isInteger(current.targetAnchor)
+    ? Number(current.targetAnchor) % BIRD_PERCH_ANCHORS.length
+    : birdAnchorIndex(entity.seed, cycle);
+  const flightStart = birdFlightPoint(entity, flightEndsAt, lifecycleAt, flightAngle);
+  const restStart = birdRestPoint(entity, cycle, restMode, targetAnchor, approachEndsAt, approachEndsAt, timing.restMs);
+  const restEnd = birdRestPoint(entity, cycle, restMode, targetAnchor, restEndsAt, approachEndsAt, timing.restMs);
+  const flightReturn = birdFlightPoint(entity, cycleEndsAt, lifecycleAt, flightAngle);
+
+  let mode: "circling" | "approaching" | "foraging" | "perched" | "takingOff";
+  let point: NormalizedPoint;
+  let heading: number;
+  let nextActionAt: number;
+  let transitionFrom: NormalizedPoint | undefined;
+  let transitionTo: NormalizedPoint | undefined;
+  let transitionStartedAt: number | undefined;
+  let transitionEndsAt: number | undefined;
+  let birdTakeoffFrom: "foraging" | "perched" | undefined;
+  if (now < flightEndsAt) {
+    mode = "circling";
+    point = birdFlightPoint(entity, now, lifecycleAt, flightAngle);
+    const angle = Math.atan2(point.z - 0.5, point.x - 0.5);
+    heading = wrapAngle(angle + Math.PI / 2);
+    nextActionAt = flightEndsAt;
+  } else if (now < approachEndsAt) {
+    mode = "approaching";
+    const progress = smoothstep((now - flightEndsAt) / timing.approachMs);
+    point = {
+      x: flightStart.x + (restStart.x - flightStart.x) * progress,
+      z: flightStart.z + (restStart.z - flightStart.z) * progress,
+    };
+    heading = wrapAngle(Math.atan2(restStart.z - flightStart.z, restStart.x - flightStart.x));
+    nextActionAt = approachEndsAt;
+    transitionFrom = flightStart;
+    transitionTo = restStart;
+    transitionStartedAt = flightEndsAt;
+    transitionEndsAt = approachEndsAt;
+  } else if (now < restEndsAt) {
+    mode = restMode;
+    point = birdRestPoint(entity, cycle, restMode, targetAnchor, now, approachEndsAt, timing.restMs);
+    heading = restMode === "perched"
+      ? wrapAngle(Math.atan2(0.5 - point.z, 0.5 - point.x))
+      : wrapAngle(targetAnchor / BIRD_PERCH_ANCHORS.length * TAU + Math.PI / 2);
+    nextActionAt = restEndsAt;
+  } else {
+    mode = "takingOff";
+    birdTakeoffFrom = restMode;
+    const progress = smoothstep((now - restEndsAt) / timing.takeoffMs);
+    point = {
+      x: restEnd.x + (flightReturn.x - restEnd.x) * progress,
+      z: restEnd.z + (flightReturn.z - restEnd.z) * progress,
+    };
+    heading = wrapAngle(Math.atan2(flightReturn.z - restEnd.z, flightReturn.x - restEnd.x));
+    nextActionAt = cycleEndsAt;
+    transitionFrom = restEnd;
+    transitionTo = flightReturn;
+    transitionStartedAt = restEndsAt;
+    transitionEndsAt = cycleEndsAt;
+  }
+
+  return {
+    ...entity,
+    x: point.x,
+    z: point.z,
+    heading,
+    state: {
+      ...current,
+      mode,
+      targetAnchor,
+      nextActionAt,
+      transitionFrom,
+      transitionTo,
+      transitionStartedAt,
+      transitionEndsAt,
+      birdLifecycleAt: lifecycleAt,
+      birdFlightAngle: flightAngle,
+      birdCycle: cycle,
+      birdRestMode: restMode,
+      birdTakeoffFrom,
+    },
+    updatedAt: now,
+  };
+}
+
+export function startBirdTakeoff(entity: SimEntity, now: number): SimEntity {
+  if (entity.kind !== "bird" || entity.state.mode === "circling" || entity.state.mode === "takingOff") return entity;
+  const timing = birdLifecycleTiming(entity.seed);
+  const endsAt = now + timing.takeoffMs;
+  const outwardAngle = Math.atan2(entity.z - 0.5, entity.x - 0.5);
+  const flightAngle = wrapAngle(outwardAngle + 0.16);
+  const radius = 0.34 + ((entity.seed >>> 6) % 55) / 1000;
+  const target = { x: 0.5 + Math.cos(flightAngle) * radius, z: 0.5 + Math.sin(flightAngle) * radius };
+  return {
+    ...entity,
+    heading: wrapAngle(Math.atan2(target.z - entity.z, target.x - entity.x)),
+    state: {
+      ...entity.state,
+      mode: "takingOff",
+      nextActionAt: endsAt,
+      transitionFrom: { x: entity.x, z: entity.z },
+      transitionTo: target,
+      transitionStartedAt: now,
+      transitionEndsAt: endsAt,
+      birdLifecycleAt: endsAt,
+      birdFlightAngle: flightAngle,
+      birdCycle: 0,
+      birdTakeoffFrom: entity.state.mode === "perched"
+        ? "perched"
+        : entity.state.mode === "foraging" ? "foraging" : "air",
+    },
+    updatedAt: now,
+  };
+}
+
 export function advanceEntity(entity: SimEntity, sequence: number, dtSeconds: number, now: number): SimEntity {
   const next = { ...entity, state: { ...entity.state } };
   const safeDt = Math.max(0, Math.min(dtSeconds, 1));
   if (next.kind === "lily") {
     next.heading = wrapAngle(next.heading + 0.025 * safeDt);
   } else if (next.kind === "bird") {
-    const mode = next.state.mode ?? "circling";
-    const anchor = BIRD_PERCH_ANCHORS[(next.state.targetAnchor ?? 0) % BIRD_PERCH_ANCHORS.length] ?? BIRD_PERCH_ANCHORS[0];
-    const transitionFrom = next.state.transitionFrom;
-    const transitionTo = next.state.transitionTo;
-    const transitionStartedAt = next.state.transitionStartedAt ?? 0;
-    const transitionEndsAt = next.state.transitionEndsAt ?? 0;
-    if (transitionFrom && transitionTo && now < transitionEndsAt) {
-      const raw = Math.max(0, Math.min(1, (now - transitionStartedAt) / Math.max(1, transitionEndsAt - transitionStartedAt)));
-      const eased = raw * raw * (3 - 2 * raw);
-      next.x = transitionFrom.x + (transitionTo.x - transitionFrom.x) * eased;
-      next.z = transitionFrom.z + (transitionTo.z - transitionFrom.z) * eased;
-      next.heading = wrapAngle(Math.atan2(transitionTo.z - transitionFrom.z, transitionTo.x - transitionFrom.x));
-    } else if (mode === "circling") {
-      const radius = 0.34 + ((next.seed >>> 6) % 55) / 1000;
-      const angle = (now / 1000) * (0.055 + next.speed * 6) + (next.seed % 6283) / 1000;
-      next.x = 0.5 + Math.cos(angle) * radius;
-      next.z = 0.5 + Math.sin(angle) * radius;
-      next.heading = wrapAngle(angle + Math.PI / 2);
-    } else if (mode === "foraging") {
-      const angle = (now / 1000) * (0.018 + next.speed * 2) + (next.seed % 6283) / 1000;
-      const radius = 0.472;
-      next.x = 0.5 + Math.cos(angle) * radius;
-      next.z = 0.5 + Math.sin(angle) * radius;
-      next.heading = wrapAngle(angle + Math.PI / 2);
-    } else {
-      const approach = Math.min(1, safeDt * 1.8);
-      next.heading = wrapAngle(Math.atan2(anchor.z - next.z, anchor.x - next.x));
-      next.x += (anchor.x - next.x) * approach;
-      next.z += (anchor.z - next.z) * approach;
-    }
+    return advanceBirdLifecycle(next, now);
   } else if (next.kind === "frog") {
     const mode = next.state.mode ?? "floating";
     const anchor = FROG_HABITAT_ANCHORS[(next.state.targetAnchor ?? 0) % FROG_HABITAT_ANCHORS.length] ?? FROG_HABITAT_ANCHORS[0];
@@ -350,7 +540,8 @@ export function applySchooling(
 
 export function fastForwardEntity(entity: SimEntity, toTime: number): SimEntity {
   if (toTime <= entity.updatedAt) return { ...entity };
-  if (entity.kind === "lily" || entity.kind === "frog" || entity.kind === "bird") {
+  if (entity.kind === "bird") return advanceBirdLifecycle(entity, toTime);
+  if (entity.kind === "lily" || entity.kind === "frog") {
     return { ...entity, state: { ...entity.state }, updatedAt: toTime };
   }
   const elapsedSeconds = (toTime - entity.updatedAt) / 1000;

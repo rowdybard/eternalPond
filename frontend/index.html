@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <base href="/">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="description" content="A tiny shared ecosystem beneath a moving sky.">
   <meta name="theme-color" content="#050510">
@@ -10,10 +11,148 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://eternalpond.com/">
   <title>eternal pond</title>
+  <script>
+    (function bootstrapPondPrivacy() {
+      'use strict';
+
+      var url = new URL(window.location.href);
+      var pendingLinkClaim = null;
+      var sensitiveQueryKeys = [
+        'pond',
+        'claim',
+        'token',
+        'soultoken',
+        'credential',
+        'email',
+        'code',
+        'session_id',
+        'checkout_session_id',
+        'payment_intent',
+        'subscription',
+        'customer',
+        'price',
+        'connection',
+        'pondws',
+        'pondapi'
+      ];
+      var isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+
+      function queryValue(name) {
+        var expected = name.toLowerCase();
+        for (var entry of url.searchParams.entries()) {
+          if (entry[0].toLowerCase() === expected) return entry[1];
+        }
+        return null;
+      }
+
+      var devWebSocketOverride = isLocalhost ? queryValue('pondWs') : null;
+      var devApiOverride = isLocalhost ? queryValue('pondApi') : null;
+
+      if (url.hash) {
+        var hashParams = new URLSearchParams(url.hash.slice(1));
+        var pondHashKey = Array.from(hashParams.keys()).find(function findPondHashKey(key) {
+          var normalized = key.toLowerCase();
+          return normalized === 'pond' || normalized === 'claim';
+        });
+        if (pondHashKey) {
+          pendingLinkClaim = hashParams.get(pondHashKey);
+        }
+        Array.from(hashParams.keys()).forEach(function removeSensitiveHashValue(key) {
+          if (sensitiveQueryKeys.indexOf(key.toLowerCase()) !== -1) hashParams.delete(key);
+        });
+        url.hash = hashParams.toString() ? '#' + hashParams.toString() : '';
+      }
+
+      if (!pendingLinkClaim) {
+        pendingLinkClaim = queryValue('pond') || queryValue('claim');
+      }
+
+      Array.from(url.searchParams.keys()).forEach(function removeSensitiveQueryValue(key) {
+        if (sensitiveQueryKeys.indexOf(key.toLowerCase()) !== -1) url.searchParams.delete(key);
+      });
+
+      if (pendingLinkClaim && pendingLinkClaim.length > 2048) pendingLinkClaim = null;
+
+      var cleanLocation = url.pathname + url.search + url.hash;
+      if (cleanLocation !== window.location.pathname + window.location.search + window.location.hash) {
+        window.history.replaceState(window.history.state, '', cleanLocation);
+      }
+
+      var analyticsPath = /^\/s\/[^/]+\/?$/.test(url.pathname) ? '/s/:slug' : '/';
+      var analyticsLocation = window.location.origin + analyticsPath;
+      var allowedEvents = Object.freeze([
+        'fish_birth',
+        'email_opt_in',
+        'memorial_open',
+        'reincarnation'
+      ]);
+      var analyticsEnabled = window.__pondAnalyticsDisabled !== true;
+
+      window.dataLayer = window.dataLayer || [];
+      window.gtag = window.gtag || function gtag() {
+        window.dataLayer.push(arguments);
+      };
+
+      Object.defineProperty(window, 'PondBootstrap', {
+        configurable: false,
+        enumerable: false,
+        value: Object.freeze({
+          analyticsPath: analyticsPath,
+          devWebSocketOverride: function devWebSocketOverrideValue() {
+            return devWebSocketOverride;
+          },
+          devApiOverride: function devApiOverrideValue() {
+            return devApiOverride;
+          },
+          hasLinkClaim: function hasLinkClaim() {
+            return Boolean(pendingLinkClaim);
+          },
+          takeLinkClaim: function takeLinkClaim() {
+            var claim = pendingLinkClaim;
+            pendingLinkClaim = null;
+            return claim;
+          }
+        }),
+        writable: false
+      });
+
+      Object.defineProperty(window, 'PondAnalytics', {
+        configurable: false,
+        enumerable: false,
+        value: Object.freeze({
+          events: allowedEvents,
+          pagePath: analyticsPath,
+          disable: function disable() {
+            analyticsEnabled = false;
+          },
+          track: function track(eventName) {
+            if (!analyticsEnabled || allowedEvents.indexOf(eventName) === -1 || typeof window.gtag !== 'function') {
+              return false;
+            }
+            window.gtag('event', eventName, {
+              page_location: analyticsLocation,
+              page_path: analyticsPath
+            });
+            return true;
+          }
+        }),
+        writable: false
+      });
+
+      if (analyticsEnabled) {
+        window.gtag('js', new Date());
+        window.gtag('config', 'G-SX17SEMR76', {
+          page_location: analyticsLocation,
+          page_path: analyticsPath
+        });
+      }
+    }());
+  </script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-SX17SEMR76"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=3.0.1">
+  <link rel="stylesheet" href="style.css?v=3.2.0">
 </head>
 <body>
   <main id="app">
@@ -45,6 +184,41 @@
     <p id="pond-notice" class="pond-notice" aria-live="polite" hidden></p>
     <p id="connection-state" class="connection-state" aria-live="polite">reaching the shared water</p>
 
+    <div class="pond-cards">
+      <section id="public-soul-card" class="pond-card public-soul-card" aria-labelledby="public-soul-name" hidden>
+        <p class="pond-card-kicker">a shared soul</p>
+        <h2 id="public-soul-name">a quiet soul</h2>
+        <p id="public-soul-state" class="pond-card-copy"></p>
+        <p id="public-soul-dedication" class="pond-card-dedication" hidden></p>
+        <button id="public-soul-ripple" class="quiet-button" type="button">leave a ripple beside this soul</button>
+      </section>
+
+      <section id="life-arrival" class="pond-card life-arrival" aria-labelledby="life-arrival-name" hidden>
+        <button id="life-arrival-close" class="pond-card-close" type="button" aria-label="Dismiss this note">&times;</button>
+        <p class="pond-card-kicker">a life has begun</p>
+        <h2 id="life-arrival-name">this soul</h2>
+        <p class="pond-card-copy"><span id="life-arrival-inline-name">This soul</span> lives here even while you&rsquo;re away.<br>Mortal lives last two to seven days.<br>Let the pond write when this life ends.</p>
+        <form id="life-letter-form" class="quiet-form">
+          <label class="field-label" for="life-letter-email">email for one quiet letter</label>
+          <div class="quiet-form-row">
+            <input id="life-letter-email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="you@example.com" required>
+            <button class="quiet-button" type="submit">let it write</button>
+          </div>
+        </form>
+        <p id="life-letter-status" class="pond-card-status" aria-live="polite"></p>
+      </section>
+
+      <section id="secure-link-card" class="pond-card secure-link-card" aria-labelledby="secure-link-title" hidden>
+        <p class="pond-card-kicker">the pond remembers</p>
+        <h2 id="secure-link-title">A remembered path is waiting.</h2>
+        <p id="secure-link-copy" class="pond-card-copy"></p>
+        <div class="quiet-actions">
+          <button id="secure-link-accept" class="quiet-button" type="button">follow this path</button>
+          <button id="secure-link-dismiss" class="text-button" type="button">not now</button>
+        </div>
+      </section>
+    </div>
+
     <div id="offering-menu" class="offering-menu" role="menu" aria-label="Leave an offering" hidden>
       <button type="button" data-offering="food" role="menuitem" aria-label="Offer food" title="Offer food">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 12c2-4 6.5-5.5 11-2.5l3-2v9l-3-2c-4.5 3-9 1.5-11-2.5Z"/><circle cx="15" cy="11" r=".6" fill="currentColor" stroke="none"/><path d="M6.5 12 3 9v6z"/></svg>
@@ -67,6 +241,10 @@
       <dl class="ledger-facts">
         <div><dt>your soul</dt><dd id="ledger-name">still arriving</dd></div>
         <div><dt>lineage</dt><dd id="ledger-lineage">no completed lives</dd></div>
+        <div id="ledger-current-name-row" hidden><dt>current fish</dt><dd id="ledger-current-name">still arriving</dd></div>
+        <div id="ledger-current-state-row" hidden><dt>state</dt><dd id="ledger-current-state">living</dd></div>
+        <div id="ledger-current-age-row" hidden><dt>this life</dt><dd id="ledger-current-age">newly born</dd></div>
+        <div id="ledger-current-passage-row" hidden><dt>passage</dt><dd id="ledger-current-passage">several days remain</dd></div>
         <div><dt>live souls</dt><dd id="ledger-souls">one quiet witness</dd></div>
         <div><dt>pond age</dt><dd id="ledger-age">newly remembered</dd></div>
         <div><dt>founding ripples</dt><dd id="ledger-ripples">149</dd></div>
@@ -76,6 +254,61 @@
         <label><span>reduced motion</span><input id="reduced-motion" type="checkbox"></label>
         <label><span>larger labels</span><input id="larger-labels" type="checkbox"></label>
       </div>
+
+      <section id="ledger-credentials" class="ledger-section" hidden>
+        <p class="ledger-kicker">remembered paths</p>
+        <p class="ledger-section-copy">This browser holds the keys shown here. Switching keeps every path saved; forgetting revokes only that browser key.</p>
+        <div id="ledger-credential-list" class="credential-list" role="list"></div>
+      </section>
+
+      <section id="ledger-sharing" class="ledger-section" hidden>
+        <p class="ledger-kicker">sharing</p>
+        <p id="ledger-sharing-status" class="ledger-section-copy">This soul is private to the pond.</p>
+        <div class="quiet-actions">
+          <button id="ledger-sharing-toggle" class="quiet-button" type="button">make a public page</button>
+          <button id="ledger-share" class="quiet-button" type="button" hidden>share this soul</button>
+        </div>
+      </section>
+
+      <section id="ledger-letters" class="ledger-section" hidden>
+        <p class="ledger-kicker">pond letters</p>
+        <p id="ledger-letter-status" class="ledger-section-copy">The pond will remain quiet.</p>
+        <form id="ledger-letter-form" class="quiet-form">
+          <label class="field-label" for="ledger-letter-email">email address</label>
+          <div class="quiet-form-row">
+            <input id="ledger-letter-email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="you@example.com" required>
+            <button class="quiet-button" type="submit">send a confirmation</button>
+          </div>
+        </form>
+        <label id="ledger-mortal-letter-row" class="ledger-toggle" hidden>
+          <span>write when a mortal life ends</span>
+          <input id="ledger-mortal-letters" type="checkbox">
+        </label>
+        <div class="quiet-actions">
+          <button id="ledger-letter-resend" class="text-button" type="button" hidden>send confirmation again</button>
+          <button id="ledger-letter-unsubscribe" class="text-button" type="button" hidden>stop all letters</button>
+        </div>
+      </section>
+
+      <section id="ledger-keeper" class="ledger-section" hidden>
+        <p class="ledger-kicker">pond keeper</p>
+        <p id="ledger-keeper-status" class="ledger-section-copy"></p>
+        <div id="keeper-checkout-actions" class="quiet-actions" hidden>
+          <button id="keeper-monthly" class="quiet-button" type="button">$3 monthly</button>
+          <button id="keeper-yearly" class="quiet-button" type="button">$30 yearly</button>
+        </div>
+        <button id="keeper-portal" class="quiet-button" type="button" hidden>manage pond keeping</button>
+        <form id="keeper-dedication-form" class="quiet-form" hidden>
+          <label class="field-label" for="keeper-dedication">short public dedication</label>
+          <textarea id="keeper-dedication" rows="3" placeholder="a few quiet words"></textarea>
+          <button class="quiet-button" type="submit">hold these words</button>
+        </form>
+        <label id="keeper-weekly-row" class="ledger-toggle" hidden>
+          <span>one truthful weekly letter</span>
+          <input id="keeper-weekly-letters" type="checkbox">
+        </label>
+      </section>
+
       <div class="ledger-memories">
         <p>recently held in the dome</p>
         <ol id="memory-list"></ol>
@@ -92,9 +325,10 @@
     </div>
   </main>
 
-  <script src="pond-client-v2.js?v=3.0.1"></script>
-  <script src="pond-ui.js?v=3.0.1"></script>
-  <script src="pond-canvas-v2.js?v=3.0.1"></script>
-  <script src="pond-boot.js?v=3.0.1"></script>
+  <script src="pond-client-v2.js?v=3.2.0"></script>
+  <script src="pond-ui.js?v=3.2.0"></script>
+  <script src="pond-canvas-v2.js?v=3.2.0"></script>
+  <script src="pond-share.js?v=3.2.0"></script>
+  <script src="pond-boot.js?v=3.2.0"></script>
 </body>
 </html>

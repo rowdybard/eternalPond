@@ -3,6 +3,17 @@
 
   const TAU = Math.PI * 2;
 
+  function publicSlugFromPath() {
+    const match = location.pathname.match(/^\/s\/([^/]+)\/?$/);
+    if (!match) return null;
+    try {
+      const slug = decodeURIComponent(match[1]).toLowerCase();
+      return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) && slug.length <= 96 ? slug : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
@@ -145,6 +156,21 @@
       };
     }
 
+    pointAtClient(clientX, clientY) {
+      const rect = this.canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+      const pond = this.bounds();
+      const ellipseX = (screenX - pond.cx) / pond.rx;
+      const ellipseY = (screenY - pond.cy) / pond.ry;
+      if (ellipseX * ellipseX + ellipseY * ellipseY > 1) return null;
+      return {
+        x: clamp(0.5 + (screenX - pond.cx) / (pond.rx * 1.82), 0.05, 0.95),
+        z: clamp(0.5 + (screenY - pond.cy) / (pond.ry * 1.82), 0.05, 0.95),
+      };
+    }
+
     draw(now) {
       const context = this.context;
       const width = this.canvas.clientWidth;
@@ -262,8 +288,8 @@
         return;
       }
       const size = state.kind === 'legendaryPenguin' ? 8 : 3.2 + state.size * 1.8;
-      point.y += Math.sin(elapsed * 2 + state.id.length) * 0.6;
-      this.drawFish(context, point, entity.heading, size, colorCss(state.tint));
+      if (!this.reducedMotion) point.y += Math.sin(elapsed * 2 + state.id.length) * 0.6;
+      this.drawFish(context, point, entity.heading, size, colorCss(state.tint), state.state && state.state.keeperAccent === true);
       if (state.label) {
         context.font = '11px system-ui, sans-serif';
         context.textAlign = 'center';
@@ -272,7 +298,7 @@
       }
     }
 
-    drawFish(context, point, heading, size, color) {
+    drawFish(context, point, heading, size, color, keeperAccent) {
       context.save();
       context.translate(point.x, point.y);
       context.rotate(heading);
@@ -292,6 +318,15 @@
       context.lineTo(size * 0.7, size * 0.12);
       context.closePath();
       context.fill();
+      if (keeperAccent) {
+        context.fillStyle = '#e8e3d2';
+        context.beginPath();
+        context.moveTo(-size * 0.12, -size * 0.34);
+        context.lineTo(size * 0.18, -size * 0.92);
+        context.lineTo(size * 0.5, -size * 0.28);
+        context.closePath();
+        context.fill();
+      }
       context.fillStyle = '#f3eee0';
       context.beginPath();
       context.arc(size * 0.9, -size * 0.22, Math.max(0.65, size * 0.11), 0, TAU);
@@ -350,6 +385,10 @@
     const ui = new window.PondUI({ reducedMotion });
     const pond = new CanvasPondV2(canvas, reducedMotion);
     const client = new window.PondClientV2({ renderer: 'canvas', reducedMotion });
+    const publicSlug = publicSlugFromPath();
+    let publicMemorialTracked = false;
+    let memorialReturnPending = false;
+    let incarnationBlocked = false;
     pond.setClock(() => client.serverNow());
     ui.setSoundEnabled(false);
     ui.showBirthCue(false);
@@ -363,19 +402,229 @@
 
     client.on('state', (state) => ui.setConnection(state));
     client.on('message', (serverMessage) => {
-      if (serverMessage.type === 'welcome') ui.setIdentity(serverMessage.identity);
-      else if (serverMessage.type === 'snapshot') {
+      if (serverMessage.type === 'welcome') {
+        ui.setWelcome(serverMessage);
+        ui.setCredentials(client.credentialSummaries());
+        incarnationBlocked = !!(serverMessage.currentLife && serverMessage.currentLife.status === 'resting');
+        if (serverMessage.recentLifeRecord) {
+          ui.showLifeEnded(serverMessage.recentLifeRecord.ageText, false, serverMessage.recentLifeRecord.completedAt);
+          if (memorialReturnPending && !publicMemorialTracked && window.PondAnalytics) {
+            publicMemorialTracked = true;
+            window.PondAnalytics.track('memorial_open');
+          }
+        }
+        memorialReturnPending = false;
+        if (publicSlug) client.observePublicSoul(publicSlug);
+      } else if (serverMessage.type === 'snapshot') {
         pond.applySnapshot(serverMessage.snapshot);
         ui.setSnapshot(serverMessage.snapshot);
+        ui.setQueue(null);
+        ui.showBirthCue(!client.ownedEntityId && !incarnationBlocked);
+        if (client.ownedEntityId) ui.awaken();
       } else if (serverMessage.type === 'delta') pond.applyDelta(serverMessage);
       else if (serverMessage.type === 'presence') ui.updatePresence(serverMessage.connectedSouls, serverMessage.capacity);
-      else if (serverMessage.type === 'error') ui.showNotice(serverMessage.message || 'the shared water shifted out of reach');
+      else if (serverMessage.type === 'queue') {
+        ui.setQueue(serverMessage);
+      }
+      else if (serverMessage.type === 'lifeStarted') {
+        incarnationBlocked = false;
+        ui.setQueue(null);
+        ui.showBirthCue(false);
+        ui.showLifeStarted(serverMessage.life);
+        if (window.PondAnalytics) {
+          window.PondAnalytics.track('fish_birth');
+          if (serverMessage.reincarnation) window.PondAnalytics.track('reincarnation');
+        }
+      } else if (serverMessage.type === 'lifeEnded') {
+        incarnationBlocked = false;
+        ui.showLifeEnded(serverMessage.ageText, true, serverMessage.completedAt, serverMessage.memory);
+      } else if (serverMessage.type === 'sharingAck') {
+        ui.setSharingBusy(false);
+        if (serverMessage.accepted) ui.setSharing(serverMessage.sharing);
+      } else if (serverMessage.type === 'publicSoulContext') {
+        ui.setPublicSoul(serverMessage.soul);
+        if (serverMessage.soul) {
+          const point = serverMessage.soul.currentLife && serverMessage.soul.currentLife.presentation
+            || serverMessage.soul.latestMemorial && serverMessage.soul.latestMemorial.rippleAnchor;
+          if (point) pond.addRitual({ x: point.x, z: point.z, strength: 0.72 });
+          if (serverMessage.soul.status !== 'alive' && !publicMemorialTracked && window.PondAnalytics) {
+            publicMemorialTracked = true;
+            window.PondAnalytics.track('memorial_open');
+          }
+        }
+      } else if (serverMessage.type === 'pondLetterAck') {
+        ui.setLetterBusy(false);
+        if (serverMessage.accepted) ui.setLetterPreference(serverMessage.preference, { trackConfirmation: true });
+        else ui.showNotice(serverMessage.reason === 'rate_limited'
+          ? 'the pond needs a little time before sending again'
+          : 'the Pond Letter could not be changed');
+      } else if (serverMessage.type === 'keeperUpdated') {
+        ui.setKeeperBusy(false);
+        ui.setKeeper(serverMessage.keeper);
+      } else if (serverMessage.type === 'ritualAck' && serverMessage.requestId && serverMessage.requestId.startsWith('public_ripple_')) {
+        ui.setPublicRippleBusy(false);
+        if (serverMessage.accepted) ui.showNotice('a ripple moves beside this soul');
+      } else if (serverMessage.type === 'ritualAck' && !serverMessage.accepted && serverMessage.reason === 'keeper_resting') {
+        incarnationBlocked = true;
+        ui.showBirthCue(false);
+        ui.showNotice('this eternal fish is resting beneath the dome');
+      } else if (serverMessage.type === 'error') {
+        ui.setSharingBusy(false);
+        ui.setLetterBusy(false);
+        ui.setKeeperBusy(false);
+        ui.setPublicRippleBusy(false);
+        ui.showNotice(serverMessage.message || 'the shared water shifted out of reach');
+      }
     });
 
-    canvas.addEventListener('pointerdown', () => {
+    ui.onSetSharing = (enabled) => {
+      ui.setSharingBusy(true);
+      client.setSharing(enabled);
+    };
+    ui.onShare = async (details) => {
+      const share = window.PondShareCard || window.PondShare;
+      if (!share) return ui.showNotice('this browser could not prepare a share');
+      const result = await share.share(details);
+      if (result.method === 'copy') ui.showNotice('the quiet link was copied');
+      else if (result.method === 'unavailable') ui.showNotice('this browser could not share the page');
+    };
+    ui.onSetPondLetter = (preference) => {
+      ui.setLetterBusy(true);
+      client.setPondLetter(preference);
+    };
+    ui.onResendPondLetter = () => {
+      ui.setLetterBusy(true);
+      client.resendPondLetterConfirmation();
+    };
+    ui.onUnsubscribePondLetters = () => {
+      ui.setLetterBusy(true);
+      client.unsubscribePondLetters();
+    };
+    ui.onPublicRipple = (slug) => {
+      ui.setPublicRippleBusy(true);
+      client.leavePublicRipple(slug);
+    };
+    ui.onMemoryFocus = (memory) => {
+      pond.addRitual({ x: memory.x, z: memory.z, strength: 0.82 });
+      ui.closeLedger();
+      ui.showNotice(`${memory.name} is held here`);
+    };
+    ui.onSwitchCredential = (credentialId) => {
+      if (!client.switchCredential(credentialId)) return;
+      ui.closeLedger();
+      ui.showNotice('returning by another remembered path');
+    };
+    ui.onForgetCredential = async (credentialId) => {
+      ui.setCredentialBusy(true);
+      try {
+        const result = await client.revokeCredential(credentialId);
+        ui.setCredentials(client.credentialSummaries());
+        if (result.wasActive) ui.closeLedger();
+        ui.showNotice(result.wasActive
+          ? result.switchedToSavedCredential
+            ? 'that key is forgotten; another remembered path is opening'
+            : 'that key is forgotten; a new soul is beginning in this browser'
+          : 'that saved browser key is forgotten');
+      } catch (error) {
+        ui.showNotice('that browser key could not be forgotten');
+      } finally {
+        ui.setCredentialBusy(false);
+      }
+    };
+    ui.onKeeperCheckout = async (interval) => {
+      ui.setKeeperBusy(true);
+      try {
+        const result = await client.createKeeperCheckout(interval);
+        const destination = new URL(result.url);
+        if (destination.protocol !== 'https:') throw new Error('invalid_checkout_destination');
+        location.assign(destination.href);
+      } catch (error) {
+        ui.setKeeperBusy(false);
+        ui.showNotice(error && error.message === 'email_required'
+          ? 'confirm a recovery address before keeping a fish'
+          : 'the keeper path could not open');
+      }
+    };
+    ui.onKeeperPortal = async () => {
+      ui.setKeeperBusy(true);
+      try {
+        const result = await client.createKeeperPortal();
+        const destination = new URL(result.url);
+        if (destination.protocol !== 'https:') throw new Error('invalid_portal_destination');
+        location.assign(destination.href);
+      } catch (error) {
+        ui.setKeeperBusy(false);
+        ui.showNotice('the keeper account could not open');
+      }
+    };
+    ui.onKeeperUpdate = async (patch) => {
+      ui.setKeeperBusy(true);
+      try {
+        const result = await client.updateKeeper(patch);
+        const keeper = result && (result.keeper || result);
+        if (keeper && typeof keeper.configured === 'boolean') ui.setKeeper(keeper);
+      } catch (error) {
+        ui.showNotice('that keeper change could not be held');
+      } finally {
+        ui.setKeeperBusy(false);
+      }
+    };
+
+    async function inspectSecureLink() {
+      if (!client.pendingLinkClaim) return;
+      try {
+        const inspection = await client.inspectPendingLink();
+        if (inspection.valid) ui.showSecureLink(inspection, !!client.currentToken());
+        else ui.showNotice('this private pond path has faded');
+      } catch (error) {
+        ui.showNotice('the private pond path could not be read');
+      }
+    }
+
+    ui.onSecureLinkAccept = async () => {
+      ui.setSecureLinkBusy(true);
+      try {
+        const result = await client.redeemPendingLink({ allowSoulSwitch: ui.allowsSecureLinkSwitch() });
+        if (!result.ok && result.message === 'switch_required') {
+          ui.requireSecureLinkSwitch(result);
+          return;
+        }
+        if (!result.ok) throw new Error(result.message || 'link_redeem_failed');
+        memorialReturnPending = result.purpose === 'return_soul';
+        if (result.purpose === 'confirm_email' && window.PondAnalytics) window.PondAnalytics.track('email_opt_in');
+        if (result.token) client.adoptCredential(result.token, { name: result.name || '' });
+        else if (result.purpose === 'confirm_email' || result.purpose === 'unsubscribe') client.refreshIdentity();
+        if (result.slug) client.observePublicSoul(result.slug);
+        ui.hideSecureLink();
+        ui.showNotice(result.message || 'the remembered path has opened');
+      } catch (error) {
+        ui.showNotice('this private pond path could not be followed');
+      } finally {
+        ui.setSecureLinkBusy(false);
+      }
+    };
+
+    let pointerStart = null;
+    canvas.addEventListener('pointerdown', (event) => {
       canvas.focus({ preventScroll: true });
       ui.awaken();
+      pointerStart = { id: event.pointerId, x: event.clientX, y: event.clientY };
     });
+    canvas.addEventListener('pointerup', (event) => {
+      if (!pointerStart || pointerStart.id !== event.pointerId) return;
+      const moved = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 10;
+      pointerStart = null;
+      if (moved) return;
+      const point = pond.pointAtClient(event.clientX, event.clientY);
+      if (!point) return;
+      pond.addRitual({ x: point.x, z: point.z, strength: client.ownedEntityId ? 0.5 : 0.72 });
+      if (client.ownedEntityId) client.ripple(point);
+      else if (!incarnationBlocked) {
+        client.incarnate(point);
+        ui.showBirthCue(false);
+      }
+    });
+    canvas.addEventListener('pointercancel', () => { pointerStart = null; });
     addEventListener('beforeunload', () => {
       client.dispose();
       pond.dispose();
@@ -383,6 +632,15 @@
     setInterval(() => ui.updateLedgerClock(client.serverNow()), 60000);
     pond.start();
     client.connect();
+    inspectSecureLink();
+    const keeperReturn = new URLSearchParams(location.search).get('keeper');
+    if (keeperReturn === 'return') ui.showNotice('the pond is waiting for the paid invoice');
+    else if (keeperReturn === 'cancel') ui.showNotice('nothing changed; the fish remains as it was');
+    if (keeperReturn) {
+      const cleaned = new URL(location.href);
+      cleaned.searchParams.delete('keeper');
+      history.replaceState(history.state, '', cleaned.pathname + cleaned.search + cleaned.hash);
+    }
     const loading = document.getElementById('loading-screen');
     if (loading) loading.classList.add('hidden');
     if (message) setTimeout(() => ui.showNotice(message), 500);

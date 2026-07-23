@@ -8,9 +8,9 @@
   ],
   "scripts": {
     "build:v2": "npm run build --workspace @eternal-pond/worker",
-    "check:frontend": "node --check frontend/pond-client-v2.js && node --check frontend/pond-ui.js && node --check frontend/pond-canvas-v2.js && node --check frontend/pond-boot.js && node --check frontend/pond3d.js && node --check frontend/pond-runtime-v2.js",
+    "check:frontend": "node --check frontend/pond-client-v2.js && node --check frontend/pond-ui.js && node --check frontend/pond-canvas-v2.js && node --check frontend/pond-share.js && node --check frontend/pond-boot.js && node --check frontend/pond3d.js && node --check frontend/pond-runtime-v2.js",
     "check:v2": "npm run check:frontend && npm run check --workspace @eternal-pond/shared && npm run check --workspace @eternal-pond/worker",
-    "test:v2": "npm run test --workspace @eternal-pond/worker",
+    "test:v2": "node --test frontend/pond-bootstrap.test.mjs frontend/pond-client-v2.test.mjs && npm run test --workspace @eternal-pond/worker",
     "load:v2": "node v2/worker/scripts/load-test.mjs",
     "dev:web": "vite frontend --host 127.0.0.1 --port 5173",
     "dev:v2:web": "npm run dev:web",

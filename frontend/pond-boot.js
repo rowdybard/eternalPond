@@ -5,8 +5,8 @@
     'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',
     'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js',
     'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js',
-    'pond3d.js?v=3.0.1',
-    'pond-runtime-v2.js?v=3.0.1',
+    'pond3d.js?v=3.2.0',
+    'pond-runtime-v2.js?v=3.2.0',
   ];
 
   function loadScript(source) {

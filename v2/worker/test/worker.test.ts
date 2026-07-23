@@ -11,6 +11,7 @@ import {
   type WelcomeMessage,
 } from "@eternal-pond/shared";
 import type { PondCoreV2 } from "../src/core";
+import worker from "../src/index";
 
 describe("Eternal Pond canonical Worker", () => {
   it("serves health and rejects an untrusted origin", async () => {
@@ -66,6 +67,94 @@ describe("Eternal Pond canonical Worker", () => {
     expect(Array.isArray(compact.motions)).toBe(true);
     expect(Array.isArray(compact.hiddenIds)).toBe(true);
     socket?.close(1000, "test complete");
+  });
+
+  it("routes by the non-secret connection and strips legacy URL tokens", async () => {
+    const connection = "safe-connection-key";
+    let gatewayName = "";
+    let forwardedUrl = "";
+    const fakeEnv = {
+      ALLOWED_ORIGINS: "http://localhost:5173",
+      POND_GATEWAY: {
+        getByName(name: string) {
+          gatewayName = name;
+          return {
+            fetch(request: Request) {
+              forwardedUrl = request.url;
+              return new Response(null, { status: 204 });
+            },
+          };
+        },
+      },
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request(
+      `http://example.com/ws/v3?connection=${connection}&token=permanent-soul-secret`,
+      { headers: { Origin: "http://localhost:5173", Upgrade: "websocket" } },
+    ), fakeEnv);
+
+    expect(response.status).toBe(204);
+    expect(gatewayName).toBe(`v2-gateway-${hashString32(connection) % 16}`);
+    const forwarded = new URL(forwardedUrl);
+    expect(forwarded.searchParams.get("connection")).toBe(connection);
+    expect(forwarded.searchParams.has("token")).toBe(false);
+  });
+
+  it("keeps legacy URL-token clients compatible through hello authentication", async () => {
+    const firstResponse = await SELF.fetch("http://example.com/ws/v3?connection=legacy-first", {
+      headers: { Origin: "http://localhost:5173", Upgrade: "websocket" },
+    });
+    const firstSocket = firstResponse.webSocket;
+    firstSocket?.accept();
+    const firstWelcome = new Promise<WelcomeMessage>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("first legacy welcome timeout")), 3000);
+      firstSocket?.addEventListener("message", (event) => {
+        const message = JSON.parse(String(event.data)) as ServerMessage;
+        if (message.type !== "welcome") return;
+        clearTimeout(timeout);
+        resolve(message);
+      });
+    });
+    firstSocket?.send(JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: "hello",
+      requestId: "hello_legacy_first",
+      renderer: "webgl",
+      reducedMotion: false,
+      clientTime: Date.now(),
+    }));
+    const original = await firstWelcome;
+    expect(original.token).toBeTruthy();
+    firstSocket?.close(1000, "legacy reconnect test");
+
+    const returnedResponse = await SELF.fetch(
+      `http://example.com/ws/v3?connection=legacy-return&token=${encodeURIComponent(original.token ?? "")}`,
+      { headers: { Origin: "http://localhost:5173", Upgrade: "websocket" } },
+    );
+    const returnedSocket = returnedResponse.webSocket;
+    returnedSocket?.accept();
+    const returnedWelcome = new Promise<WelcomeMessage>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("returned legacy welcome timeout")), 3000);
+      returnedSocket?.addEventListener("message", (event) => {
+        const message = JSON.parse(String(event.data)) as ServerMessage;
+        if (message.type !== "welcome") return;
+        clearTimeout(timeout);
+        resolve(message);
+      });
+    });
+    returnedSocket?.send(JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: "hello",
+      requestId: "hello_legacy_return",
+      token: original.token,
+      renderer: "webgl",
+      reducedMotion: false,
+      clientTime: Date.now(),
+    }));
+    const returned = await returnedWelcome;
+    expect(returned.identity.id).toBe(original.identity.id);
+    expect(returned.token).toBeUndefined();
+    returnedSocket?.close(1000, "legacy reconnect complete");
   });
 
   it("restores a hibernated gateway socket from its serialized attachment", async () => {
@@ -127,7 +216,7 @@ describe("Eternal Pond canonical Worker", () => {
       const count = state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM founding_ripples").one().count;
       expect(count).toBe(149);
       const version = state.storage.sql.exec<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations").one().version;
-      expect(version).toBe(3);
+      expect(version).toBe(8);
     });
   });
 

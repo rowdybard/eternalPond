@@ -18,7 +18,23 @@
   "vars": {
     "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,https://eternalpond.com,https://www.eternalpond.com",
     "WORLD_CAPACITY": "128",
-    "FOUNDING_RIPPLES": "149"
+    "FOUNDING_RIPPLES": "149",
+    "PUBLIC_APP_ORIGIN": "https://eternalpond.com",
+    "RESEND_FROM": "Eternal Pond <pond@eternalpond.com>",
+    "KEEPER_BILLING_ENABLED": "false",
+    "STRIPE_MONTHLY_PRICE_ID": "",
+    "STRIPE_ANNUAL_PRICE_ID": "",
+    "STRIPE_PORTAL_CONFIGURATION_ID": ""
+  },
+  "secrets": {
+    "required": [
+      "RESEND_API_KEY",
+      "RESEND_WEBHOOK_SECRET",
+      "EMAIL_ENCRYPTION_KEY",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_WEBHOOK_SECRET",
+      "ANALYTICS_BEARER_TOKEN"
+    ]
   },
   "observability": {
     "enabled": true,

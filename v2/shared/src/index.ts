@@ -1,6 +1,8 @@
 export const PROTOCOL_VERSION = 3 as const;
 export const MAX_CLIENT_MESSAGE_BYTES = 4096;
 export const MAX_RIPPLE_BATCH_POINTS = 12;
+export const MAX_PUBLIC_SOUL_SLUG_LENGTH = 96;
+export const MAX_POND_LETTER_EMAIL_LENGTH = 254;
 export const ORBIT_PERIOD_MS = 60 * 60 * 1000;
 export const OFFERING_COOLDOWN_MS = 5 * 60 * 1000;
 export const NEWBORN_REFUGE_MS = 10 * 60 * 1000;
@@ -14,6 +16,7 @@ export type MemorialPhase = "water" | "dome";
 export type EntityKind = "soulFish" | "wildFish" | "legendaryPenguin" | "lily" | "bird" | "frog";
 export type EntitySource = "baseline" | "offering" | "recovery";
 export type FrogMode = "swimming" | "floating" | "lily" | "shore" | "ground" | "feeding";
+export type BirdMode = "circling" | "approaching" | "foraging" | "perched" | "takingOff";
 
 export interface NormalizedPoint {
   x: number;
@@ -23,7 +26,7 @@ export interface NormalizedPoint {
 export interface EntityRuntimeState {
   source?: EntitySource;
   ownerSoulId?: string;
-  mode?: FrogMode | "circling" | "foraging" | "perched" | "returning";
+  mode?: FrogMode | BirdMode | "returning";
   growthScale?: number;
   feedCount?: number;
   targetAnchor?: number;
@@ -33,6 +36,12 @@ export interface EntityRuntimeState {
   transitionTo?: NormalizedPoint;
   transitionStartedAt?: number;
   transitionEndsAt?: number;
+  birdLifecycleAt?: number;
+  birdFlightAngle?: number;
+  birdCycle?: number;
+  birdRestMode?: "foraging" | "perched";
+  birdTakeoffFrom?: "air" | "foraging" | "perched";
+  keeperAccent?: boolean;
 }
 
 interface ClientMessageBase {
@@ -73,19 +82,125 @@ export interface LeaveMessage extends ClientMessageBase {
   type: "leave";
 }
 
+export interface SetSharingMessage extends ClientMessageBase {
+  type: "setSharing";
+  enabled: boolean;
+}
+
+export interface ObservePublicSoulMessage extends ClientMessageBase {
+  type: "observePublicSoul";
+  slug: string;
+}
+
+export interface LeavePublicRippleMessage extends ClientMessageBase {
+  type: "leavePublicRipple";
+  slug: string;
+}
+
+export interface SetPondLetterMessage extends ClientMessageBase {
+  type: "setPondLetter";
+  email?: string;
+  mortalLetters?: boolean;
+  keeperLetters?: boolean;
+}
+
+export interface ResendPondLetterConfirmationMessage extends ClientMessageBase {
+  type: "resendPondLetterConfirmation";
+}
+
+export interface UnsubscribePondLettersMessage extends ClientMessageBase {
+  type: "unsubscribePondLetters";
+}
+
 export type ClientMessage =
   | HelloMessage
   | IncarnateMessage
   | RippleBatchMessage
   | OfferMessage
   | FocusMessage
-  | LeaveMessage;
+  | LeaveMessage
+  | SetSharingMessage
+  | ObservePublicSoulMessage
+  | LeavePublicRippleMessage
+  | SetPondLetterMessage
+  | ResendPondLetterConfirmationMessage
+  | UnsubscribePondLettersMessage;
 
 export interface SoulIdentity {
   id: string;
   name: string;
   tint: number;
   completedLives: number;
+}
+
+export interface SharingSummary {
+  enabled: boolean;
+  slug?: string;
+  url?: string;
+}
+
+export type PondLetterStatus = "none" | "pending" | "confirmed" | "unsubscribed" | "suppressed";
+
+export interface LetterPreferenceSummary {
+  available: boolean;
+  status: PondLetterStatus;
+  maskedEmail?: string;
+  mortalLetters: boolean;
+  keeperLetters: boolean;
+}
+
+export type KeeperPresentationState = "none" | "eligible" | "pending" | "active" | "canceling" | "past_due" | "resting";
+
+export interface KeeperSummary {
+  configured: boolean;
+  eligible: boolean;
+  requiresConfirmedEmail: boolean;
+  state: KeeperPresentationState;
+  interval?: "month" | "year";
+  paidThroughAt?: number;
+  fishPhase?: "water" | "dome";
+  dedication?: string;
+  weeklyLetters: boolean;
+}
+
+export interface CurrentLifeSummary {
+  lifeId: string;
+  entityId: string;
+  name: string;
+  lifeKind: "mortal" | "eternal";
+  status: "living" | "resting";
+  bornAt: number;
+  endsAt: number | null;
+  memorialPhase?: MemorialPhase;
+}
+
+export type PublicSoulStatus = "alive" | "resting" | "remembered";
+
+export interface PublicSoulView {
+  slug: string;
+  name: string;
+  tint: number;
+  status: PublicSoulStatus;
+  completedLives: number;
+  dedication?: string;
+  currentLife?: {
+    kind: "mortal" | "eternal";
+    ageText: string;
+    remainingPassageText?: string;
+    presentation: {
+      x: number;
+      z: number;
+      depth: number;
+      heading: number;
+      size: number;
+      ageRatio: number;
+    };
+  };
+  latestMemorial?: {
+    completedAt: number;
+    ageText: string;
+    rippleAnchor: NormalizedPoint;
+  };
 }
 
 export interface EntityState {
@@ -138,6 +253,8 @@ export interface DomeMemory {
   tint: number;
   completedAt: number;
   lifeKind: LifeKind;
+  x?: number;
+  z?: number;
 }
 
 export interface RecentLifeRecord {
@@ -225,6 +342,10 @@ export interface WelcomeMessage {
   ownedEntityId: string | null;
   renderer: RendererKind;
   recentLifeRecord?: RecentLifeRecord;
+  sharing?: SharingSummary;
+  pondLetters?: LetterPreferenceSummary;
+  currentLife?: CurrentLifeSummary | null;
+  keeper?: KeeperSummary;
 }
 
 export interface SnapshotMessage {
@@ -257,7 +378,7 @@ export interface RitualAckMessage {
   accepted: boolean;
   sampledPoint?: NormalizedPoint;
   nextOfferingAt?: number;
-  reason?: "cooldown" | "spectator" | "invalid" | "unborn";
+  reason?: "cooldown" | "spectator" | "invalid" | "unborn" | "keeper_resting";
 }
 
 export interface QueueMessage {
@@ -278,6 +399,47 @@ export interface LifeEndedMessage {
   completedAt: number;
   ageText: string;
   memoryId: string;
+  memory?: DomeMemory;
+}
+
+export interface LifeStartedMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "lifeStarted";
+  requestId: string;
+  life: CurrentLifeSummary;
+  reincarnation: boolean;
+}
+
+export interface SharingAckMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "sharingAck";
+  requestId: string;
+  accepted: boolean;
+  sharing: SharingSummary;
+}
+
+export interface PublicSoulContextMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "publicSoulContext";
+  requestId: string;
+  soul: PublicSoulView | null;
+}
+
+export interface PondLetterAckMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "pondLetterAck";
+  requestId: string;
+  accepted: boolean;
+  preference: LetterPreferenceSummary;
+  confirmationSent?: boolean;
+  reason?: "invalid_email" | "rate_limited" | "not_configured" | "unchanged" | "suppressed" | "email_unavailable";
+}
+
+export interface KeeperUpdatedMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "keeperUpdated";
+  requestId: string;
+  keeper: KeeperSummary;
 }
 
 export interface PresenceMessage {
@@ -302,7 +464,12 @@ export type ServerMessage =
   | DeltaMessage
   | RitualAckMessage
   | QueueMessage
+  | LifeStartedMessage
   | LifeEndedMessage
+  | SharingAckMessage
+  | PublicSoulContextMessage
+  | PondLetterAckMessage
+  | KeeperUpdatedMessage
   | PresenceMessage
   | ErrorMessage;
 
@@ -313,6 +480,7 @@ export interface ParseResult {
 }
 
 const REQUEST_ID_PATTERN = /^[a-zA-Z0-9_-]{6,80}$/;
+const PUBLIC_SOUL_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,94}[a-z0-9])?$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -323,6 +491,20 @@ function isPoint(value: unknown): value is NormalizedPoint {
   return Number.isFinite(value.x) && Number.isFinite(value.z)
     && Number(value.x) >= 0 && Number(value.x) <= 1
     && Number(value.z) >= 0 && Number(value.z) <= 1;
+}
+
+function isPublicSoulSlug(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= MAX_PUBLIC_SOUL_SLUG_LENGTH
+    && PUBLIC_SOUL_SLUG_PATTERN.test(value);
+}
+
+function isPondLetterEmail(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > MAX_POND_LETTER_EMAIL_LENGTH) return false;
+  const normalized = value.trim();
+  return normalized.length >= 3
+    && !/[\u0000-\u001f\u007f\s]/.test(normalized)
+    && /^[^@]+@[^@]+\.[^@]+$/.test(normalized);
 }
 
 export function parseClientMessage(raw: string): ParseResult {
@@ -362,6 +544,27 @@ export function parseClientMessage(raw: string): ParseResult {
         return { ok: false, error: "invalid_focus" };
       }
       break;
+    case "setSharing":
+      if (typeof value.enabled !== "boolean") return { ok: false, error: "invalid_sharing" };
+      break;
+    case "observePublicSoul":
+    case "leavePublicRipple":
+      if (!isPublicSoulSlug(value.slug)) return { ok: false, error: "invalid_public_soul" };
+      break;
+    case "setPondLetter": {
+      const hasEmail = value.email !== undefined;
+      const hasMortalPreference = value.mortalLetters !== undefined;
+      const hasKeeperPreference = value.keeperLetters !== undefined;
+      if ((!hasEmail && !hasMortalPreference && !hasKeeperPreference)
+        || (hasEmail && !isPondLetterEmail(value.email))
+        || (hasMortalPreference && typeof value.mortalLetters !== "boolean")
+        || (hasKeeperPreference && typeof value.keeperLetters !== "boolean")) {
+        return { ok: false, error: "invalid_pond_letter" };
+      }
+      break;
+    }
+    case "resendPondLetterConfirmation":
+    case "unsubscribePondLetters":
     case "leave":
       break;
     default:

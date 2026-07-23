@@ -11,6 +11,7 @@ import {
   type BackgroundCohort,
   type CapacityState,
   type ClientMessage,
+  type CurrentLifeSummary,
   type DomeMemory,
   type EntityMotion,
   type EntityKind,
@@ -40,9 +41,48 @@ import {
   fastForwardEntity,
   isLegendaryWindow,
   isNaturalLifeComplete,
+  startBirdTakeoff,
   type SimEntity,
 } from "./simulation";
 import { insertReturningFirstFifo } from "./queue";
+import { GROWTH_SCHEMA_VERSION, installGrowthSchema } from "./growth-schema";
+import {
+  addUtcDays,
+  approximateLifeAge,
+  deterministicMemorialPoint,
+  fraction,
+  isPublicSlug,
+  normalizeDedication,
+  publicSlugBase,
+  remainingPassage,
+  utcDay,
+  utcDayStart,
+  GROWTH_DAY_MS,
+} from "./growth-utils";
+import {
+  decryptText,
+  encryptText,
+  keyedEmailHash,
+  maskEmail,
+  normalizeEmail,
+  randomToken,
+  sha256Hex,
+} from "./crypto";
+import { emailConfigured, escapeHtml, sendPondEmail } from "./email";
+import { keeperBillingConfigured } from "./billing";
+import type {
+  KeeperCheckoutPreparation,
+  KeeperPortalPreparation,
+  KeeperSummary,
+  LetterPreferenceSummary,
+  LinkInspection,
+  LinkRedemption,
+  NormalizedStripeEvent,
+  PublicSoulView,
+  RetentionCohort,
+  RetentionReport,
+  SharingSummary,
+} from "./growth-types";
 
 interface SoulRow {
   [key: string]: SqlStorageValue;
@@ -87,6 +127,37 @@ interface ScheduledEventRow {
   payload_json: string;
 }
 
+interface LetterPreferenceRow {
+  [key: string]: SqlStorageValue;
+  soul_id: string;
+  email_ciphertext: string | null;
+  email_iv: string | null;
+  email_hash: string | null;
+  email_masked: string | null;
+  encryption_version: number;
+  status: "pending" | "confirmed" | "unsubscribed" | "suppressed";
+  consent_version: number;
+  mortal_letters_enabled: number;
+  keeper_letters_enabled: number;
+  requested_at: number;
+  confirmed_at: number | null;
+  unsubscribed_at: number | null;
+  last_confirmation_sent_at: number | null;
+}
+
+interface EmailDeliveryRow {
+  [key: string]: SqlStorageValue;
+  id: string;
+  dedupe_key: string;
+  soul_id: string;
+  delivery_kind: "confirmation" | "mortal_death" | "keeper_weekly";
+  life_id: string | null;
+  membership_id: string | null;
+  status: string;
+  due_at: number;
+  provider_id: string | null;
+}
+
 interface SessionRecord {
   sessionId: string;
   soulId: string;
@@ -95,6 +166,8 @@ interface SessionRecord {
   reducedMotion: boolean;
   entityId: string | null;
   connectedAt: number;
+  observedSoulId: string | null;
+  observedSlug: string | null;
 }
 
 interface QueueEntry {
@@ -154,7 +227,7 @@ export interface PublicPondStatus {
   ecology: { canonicalNpcs: number; detailedNpcs: number; backgroundCohorts: number };
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = GROWTH_SCHEMA_VERSION;
 const CORE_NAME = "canonical-world";
 const CHECKPOINT_INTERVAL_MS = 15_000;
 const LEGENDARY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
@@ -425,6 +498,7 @@ export class PondCoreV2 extends DurableObject<Env> {
       sql.exec("CREATE INDEX IF NOT EXISTS offerings_kind_time ON offerings(offering_kind, accepted_at DESC)");
       sql.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)", Date.now());
     }
+    installGrowthSchema(sql, current, Date.now());
   }
 
   private readMeta(key: string): string | null {
@@ -442,6 +516,9 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private loadWorld(): void {
     const now = Date.now();
+    this.ctx.storage.sql.exec(
+      "UPDATE email_deliveries SET status = 'unknown', failure_code = 'ambiguous_restart' WHERE status = 'sending'",
+    );
     this.pondBornAt = asNumber(this.readMeta("pond_born_at") ?? undefined, now);
     this.orbitEpoch = asNumber(this.readMeta("orbit_epoch") ?? undefined, Math.floor(now / ORBIT_PERIOD_MS) * ORBIT_PERIOD_MS);
     this.sequence = asNumber(this.readMeta("sequence") ?? undefined, 0);
@@ -482,7 +559,7 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private migrateCanonicalEcology(now: number): void {
     const generation = asNumber(this.readMeta("ecology_generation") ?? undefined, 0);
-    if (generation >= 4) return;
+    if (generation >= 5) return;
 
     if (generation < 3) {
       for (const entity of [...this.entities.values()]) {
@@ -515,16 +592,11 @@ export class PondCoreV2 extends DurableObject<Env> {
           const mode = rest.mode === "foraging" || rest.mode === "perched" ? rest.mode : "circling";
           const targetAnchor = index % BIRD_PERCH_ANCHORS.length;
           entity.state = { ...rest, mode, targetAnchor };
-          if (mode === "perched") {
-            const anchor = BIRD_PERCH_ANCHORS[targetAnchor] ?? BIRD_PERCH_ANCHORS[0];
-            entity.x = anchor.x;
-            entity.z = anchor.z;
-          } else {
-            const moved = advanceEntity(entity, this.sequence, 0, now);
-            entity.x = moved.x;
-            entity.z = moved.z;
-            entity.heading = moved.heading;
-          }
+          const moved = advanceEntity(entity, this.sequence, 0, now);
+          entity.x = moved.x;
+          entity.z = moved.z;
+          entity.heading = moved.heading;
+          entity.state = moved.state;
         } else {
           const mode = rest.mode ?? "floating";
           const pool = mode === "shore" ? [2, 3] : mode === "ground" ? [4, 5] : [0, 1];
@@ -538,7 +610,7 @@ export class PondCoreV2 extends DurableObject<Env> {
         this.persistEntity(entity);
       }
     }
-    this.writeMeta("ecology_generation", 4);
+    this.writeMeta("ecology_generation", 5);
     this.writeMeta("next_micro_at", this.nextMicroAt);
     this.writeMeta("next_bird_hunt_at", this.nextBirdHuntAt);
   }
@@ -616,10 +688,13 @@ export class PondCoreV2 extends DurableObject<Env> {
   }
 
   private findSoulByTokenHash(tokenHash: string): SoulRow | null {
-    return this.ctx.storage.sql.exec<SoulRow>(
-      "SELECT id, poetic_name, tint, completed_lives, last_seen_at FROM souls WHERE token_hash = ?",
-      tokenHash,
-    ).toArray()[0] ?? null;
+    return this.ctx.storage.sql.exec<SoulRow>(`
+      SELECT souls.id, souls.poetic_name, souls.tint, souls.completed_lives, souls.last_seen_at
+      FROM soul_credentials
+      JOIN souls ON souls.id = soul_credentials.soul_id
+      WHERE soul_credentials.token_hash = ? AND soul_credentials.revoked_at IS NULL
+      LIMIT 1
+    `, tokenHash).toArray()[0] ?? null;
   }
 
   private createPoeticName(soulId: string): string {
@@ -644,6 +719,11 @@ export class PondCoreV2 extends DurableObject<Env> {
       "INSERT INTO souls(id, token_hash, poetic_name, tint, created_at, last_seen_at, completed_lives) VALUES (?, ?, ?, ?, ?, ?, 0)",
       id, tokenHash, poeticName, tint, now, now,
     );
+    this.ctx.storage.sql.exec(
+      "INSERT INTO soul_credentials(id, soul_id, token_hash, created_at, last_used_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)",
+      crypto.randomUUID(), id, tokenHash, now, now,
+    );
+    this.recordSoulEvent(id, "credential_created", now);
     return { id, poetic_name: poeticName, tint, completed_lives: 0, last_seen_at: now };
   }
 
@@ -656,6 +736,14 @@ export class PondCoreV2 extends DurableObject<Env> {
     let count = 0;
     for (const entity of this.entities.values()) if (entity.kind === "soulFish" && entity.foreground) count++;
     return count;
+  }
+
+  private observedSoulIds(): Set<string> {
+    return new Set(
+      [...this.sessions.values()]
+        .map((session) => session.observedSoulId)
+        .filter((soulId): soulId is string => Boolean(soulId)),
+    );
   }
 
   private connectedSoulCount(): number {
@@ -682,11 +770,12 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private getBackgroundCohorts(): BackgroundCohort[] {
     const groups = new Map<string, SimEntity[]>();
+    const observedSoulIds = this.observedSoulIds();
     for (const entity of this.entities.values()) {
       let kind: BackgroundCohort["kind"];
       let key: string;
       if (entity.soulId) {
-        if (entity.foreground) continue;
+        if (entity.foreground || observedSoulIds.has(entity.soulId) || entity.memorialPhase === "dome") continue;
         kind = entity.lifeKind === "memorial" ? "memorial" : "mortal";
         key = `${kind}:${Math.abs(entity.tint) % 4}`;
       } else {
@@ -749,11 +838,137 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private wireEntities(now: number): SimEntity[] {
     const visibleWild = this.idleWildIds(now);
+    const observedSoulIds = this.observedSoulIds();
     return [...this.entities.values()].filter((entity) => {
-      if (entity.soulId) return entity.foreground;
+      if (entity.soulId) {
+        if (entity.memorialPhase === "dome") return false;
+        return entity.foreground || observedSoulIds.has(entity.soulId);
+      }
       if (entity.kind === "wildFish") return visibleWild.has(entity.id);
       return true;
     });
+  }
+
+  private currentLifeSummary(soulId: string): CurrentLifeSummary | null {
+    const entity = this.findSoulEntity(soulId);
+    if (!entity?.lifeId || !entity.label || entity.bornAt === null) return null;
+    return {
+      lifeId: entity.lifeId,
+      entityId: entity.id,
+      name: entity.label,
+      lifeKind: entity.lifeKind === "memorial" ? "eternal" : "mortal",
+      status: entity.memorialPhase === "dome" ? "resting" : "living",
+      bornAt: entity.bornAt,
+      endsAt: entity.endsAt,
+      memorialPhase: entity.memorialPhase ?? undefined,
+    };
+  }
+
+  private sharingSummary(soulId: string): SharingSummary {
+    const row = this.ctx.storage.sql.exec<{ slug: string; disabled_at: number | null }>(
+      "SELECT slug, disabled_at FROM public_souls WHERE soul_id = ?",
+      soulId,
+    ).toArray()[0];
+    if (!row || row.disabled_at !== null) return { enabled: false };
+    const origin = String(this.env.PUBLIC_APP_ORIGIN || "").replace(/\/$/u, "");
+    return {
+      enabled: true,
+      slug: row.slug,
+      url: origin ? `${origin}/s/${row.slug}` : `/s/${row.slug}`,
+    };
+  }
+
+  private letterPreferenceSummary(soulId: string): LetterPreferenceSummary {
+    const row = this.ctx.storage.sql.exec<{
+      status: LetterPreferenceSummary["status"];
+      email_masked: string | null;
+      mortal_letters_enabled: number;
+      keeper_letters_enabled: number;
+    }>(`
+      SELECT status, email_masked, mortal_letters_enabled, keeper_letters_enabled
+      FROM pond_letter_preferences WHERE soul_id = ?
+    `, soulId).toArray()[0];
+    return {
+      available: emailConfigured(this.env) && Boolean(this.env.EMAIL_ENCRYPTION_KEY),
+      status: row?.status ?? "none",
+      maskedEmail: row?.email_masked ?? undefined,
+      mortalLetters: row?.mortal_letters_enabled === 1,
+      keeperLetters: row?.keeper_letters_enabled === 1,
+    };
+  }
+
+  private keeperEligible(soulId: string): boolean {
+    const soul = this.ctx.storage.sql.exec<{ completed_lives: number }>(
+      "SELECT completed_lives FROM souls WHERE id = ?",
+      soulId,
+    ).toArray()[0];
+    if ((soul?.completed_lives ?? 0) > 0) return true;
+    const distinctVisitDays = this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM soul_visits WHERE soul_id = ?",
+      soulId,
+    ).one().count;
+    return distinctVisitDays >= 2;
+  }
+
+  private keeperSummary(soulId: string, configured = keeperBillingConfigured(this.env)): KeeperSummary {
+    const now = Date.now();
+    const preference = this.letterPreferenceSummary(soulId);
+    const row = this.ctx.storage.sql.exec<{
+      stripe_status: string | null;
+      billing_interval: "month" | "year" | null;
+      cancel_at_period_end: number;
+      paid_through_at: number | null;
+      activated_at: number | null;
+      rested_at: number | null;
+      dedication: string | null;
+      weekly_letters_enabled: number;
+    }>(`
+      SELECT stripe_status, billing_interval, cancel_at_period_end, paid_through_at,
+        activated_at, rested_at, dedication, weekly_letters_enabled
+      FROM keeper_memberships WHERE soul_id = ?
+    `, soulId).toArray()[0];
+    const eligible = this.keeperEligible(soulId);
+    let state: KeeperSummary["state"] = eligible ? "eligible" : "none";
+    if (row) {
+      const paid = row.paid_through_at !== null && row.paid_through_at > now;
+      const checkoutPending = row.activated_at === null && this.ctx.storage.sql.exec<{ count: number }>(`
+        SELECT COUNT(*) AS count FROM keeper_checkout_attempts
+        WHERE membership_id = (SELECT id FROM keeper_memberships WHERE soul_id = ?)
+          AND state IN ('pending', 'created') AND expires_at > ?
+      `, soulId, now).one().count > 0;
+      if (row.activated_at === null) state = checkoutPending ? "pending" : eligible ? "eligible" : "none";
+      else if (row.rested_at !== null && !paid) state = "resting";
+      else if (row.stripe_status === "past_due" && paid) state = "past_due";
+      else if (row.cancel_at_period_end === 1 && paid) state = "canceling";
+      else if (paid) state = "active";
+      else state = "resting";
+    }
+    const entity = this.findSoulEntity(soulId);
+    return {
+      configured,
+      eligible,
+      requiresConfirmedEmail: preference.status !== "confirmed",
+      state,
+      interval: row?.billing_interval ?? undefined,
+      paidThroughAt: row?.paid_through_at ?? undefined,
+      fishPhase: entity?.lifeKind === "memorial" ? (entity.memorialPhase ?? "water") : undefined,
+      dedication: row?.dedication ?? undefined,
+      weeklyLetters: row?.weekly_letters_enabled === 1 && preference.keeperLetters,
+    };
+  }
+
+  private recordVisit(soulId: string, now: number): void {
+    this.ctx.storage.sql.exec(`
+      INSERT INTO soul_visits(soul_id, day, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(soul_id, day) DO UPDATE SET last_seen_at = MAX(last_seen_at, excluded.last_seen_at)
+    `, soulId, utcDay(now), now, now);
+  }
+
+  private recordSoulEvent(soulId: string, eventKind: string, eventAt: number, payload: Record<string, unknown> = {}): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO soul_events(id, soul_id, event_kind, event_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+      crypto.randomUUID(), soulId, eventKind, eventAt, JSON.stringify(payload),
+    );
   }
 
   private getMemories(): DomeMemory[] {
@@ -764,7 +979,16 @@ export class PondCoreV2 extends DurableObject<Env> {
       tint: number;
       completed_at: number;
       life_kind: "mortal" | "memorial";
-    }>("SELECT id, soul_id, display_name, tint, completed_at, life_kind FROM memories ORDER BY completed_at DESC LIMIT 120")
+      x: number | null;
+      z: number | null;
+    }>(`
+      SELECT memories.id, memories.soul_id, memories.display_name, memories.tint,
+        memories.completed_at, memories.life_kind, memories.x, memories.z
+      FROM memories
+      LEFT JOIN lives ON lives.id = memories.life_id
+      WHERE memories.life_kind != 'memorial' OR lives.memorial_phase = 'dome'
+      ORDER BY memories.completed_at DESC LIMIT 120
+    `)
       .toArray()
       .map((row) => ({
         id: row.id,
@@ -773,6 +997,8 @@ export class PondCoreV2 extends DurableObject<Env> {
         tint: row.tint,
         completedAt: row.completed_at,
         lifeKind: row.life_kind,
+        x: row.x ?? undefined,
+        z: row.z ?? undefined,
       }));
   }
 
@@ -798,17 +1024,30 @@ export class PondCoreV2 extends DurableObject<Env> {
     let issuedToken: string | undefined;
     let soul: SoulRow | null = null;
     let recentLifeRecord: RecentLifeRecord | undefined;
+    let presentedTokenHash: string | null = null;
+    let returningConnection = false;
     if (input.token && input.token.length >= 20 && input.token.length <= 256) {
-      soul = this.findSoulByTokenHash(await hashToken(input.token));
+      presentedTokenHash = await hashToken(input.token);
+      soul = this.findSoulByTokenHash(presentedTokenHash);
     }
     if (!soul) {
       issuedToken = makeToken();
       soul = this.createSoul(await hashToken(issuedToken), now);
       this.track("new_soul");
     } else {
-      recentLifeRecord = this.recentLifeRecord(soul.id, soul.last_seen_at);
-      this.ctx.storage.sql.exec("UPDATE souls SET last_seen_at = ? WHERE id = ?", now, soul.id);
+      const alreadyPresent = [...this.sessions.values()].some((session) => session.soulId === soul?.id);
+      returningConnection = !alreadyPresent;
+      if (!alreadyPresent) recentLifeRecord = this.recentLifeRecord(soul.id, soul.last_seen_at);
+      if (presentedTokenHash) {
+        this.ctx.storage.sql.exec(
+          "UPDATE soul_credentials SET last_used_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+          now, presentedTokenHash,
+        );
+      }
     }
+
+    this.recordVisit(soul.id, now);
+    if (returningConnection) this.recordSoulEvent(soul.id, "authenticated_connection", now);
 
     const sessionId = crypto.randomUUID();
     const session: SessionRecord = {
@@ -819,6 +1058,8 @@ export class PondCoreV2 extends DurableObject<Env> {
       reducedMotion: input.reducedMotion,
       entityId: null,
       connectedAt: now,
+      observedSoulId: null,
+      observedSlug: null,
     };
     this.sessions.set(sessionId, session);
     this.activeGatewayShards.add(input.gatewayShard);
@@ -827,6 +1068,8 @@ export class PondCoreV2 extends DurableObject<Env> {
 
     if (input.renderer === "canvas") {
       this.track("renderer_fallback");
+    } else if (existingEntity?.lifeKind === "memorial" && existingEntity.memorialPhase === "dome") {
+      this.track("return");
     } else if (existingEntity) {
       if (this.foregroundSoulCount() < this.capacityLimit || existingEntity.foreground) {
         existingEntity.foreground = true;
@@ -855,9 +1098,13 @@ export class PondCoreV2 extends DurableObject<Env> {
       token: issuedToken,
       sessionId,
       identity: this.identityForSoul(soul),
-      ownedEntityId: session.entityId ?? existingEntity?.id ?? null,
+      ownedEntityId: session.entityId,
       renderer: input.renderer,
       recentLifeRecord,
+      sharing: this.sharingSummary(soul.id),
+      pondLetters: this.letterPreferenceSummary(soul.id),
+      currentLife: this.currentLifeSummary(soul.id),
+      keeper: this.keeperSummary(soul.id),
     };
     const snapshot: SnapshotMessage = {
       v: PROTOCOL_VERSION,
@@ -922,7 +1169,7 @@ export class PondCoreV2 extends DurableObject<Env> {
         });
         continue;
       }
-      const messages = this.handleMessage(session, entry.message);
+      const messages = await this.handleMessage(session, entry.message);
       if (messages.length > 0) deliveries.push({ sessionId: entry.sessionId, messages });
     }
     return deliveries;
@@ -937,7 +1184,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     return true;
   }
 
-  private handleMessage(session: SessionRecord, message: Exclude<ClientMessage, { type: "hello" }>): ServerMessage[] {
+  private async handleMessage(session: SessionRecord, message: Exclude<ClientMessage, { type: "hello" }>): Promise<ServerMessage[]> {
     const now = Date.now();
     switch (message.type) {
       case "incarnate":
@@ -950,10 +1197,638 @@ export class PondCoreV2 extends DurableObject<Env> {
       case "focus":
         if (message.entityId && message.entityId === session.entityId) this.track("ride");
         return [];
+      case "setSharing":
+        return [this.handleSetSharing(session, message.requestId, message.enabled, now)];
+      case "observePublicSoul":
+        return [this.handleObservePublicSoul(session, message.requestId, message.slug)];
+      case "leavePublicRipple":
+        return [this.handlePublicRipple(session, message.requestId, message.slug, now)];
+      case "setPondLetter":
+        return [await this.handleSetPondLetter(session, message, now)];
+      case "resendPondLetterConfirmation":
+        return [await this.handleResendPondLetterConfirmation(session, message.requestId, now)];
+      case "unsubscribePondLetters":
+        return [this.handleUnsubscribePondLetters(session, message.requestId, now)];
       case "leave":
         this.ctx.waitUntil(this.disconnectSoul(session.sessionId));
         return [];
     }
+  }
+
+  private handleSetSharing(session: SessionRecord, requestId: string, enabled: boolean, now: number): ServerMessage {
+    const existing = this.ctx.storage.sql.exec<{ slug: string }>(
+      "SELECT slug FROM public_souls WHERE soul_id = ?",
+      session.soulId,
+    ).toArray()[0];
+    if (enabled) {
+      if (existing) {
+        this.ctx.storage.sql.exec("UPDATE public_souls SET disabled_at = NULL WHERE soul_id = ?", session.soulId);
+      } else {
+        const soul = this.ctx.storage.sql.exec<{ poetic_name: string }>(
+          "SELECT poetic_name FROM souls WHERE id = ?",
+          session.soulId,
+        ).one();
+        const base = publicSlugBase(soul.poetic_name);
+        let slug = base;
+        for (let attempt = 0; attempt < 32; attempt++) {
+          const collision = this.ctx.storage.sql.exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM public_souls WHERE slug = ? COLLATE NOCASE",
+            slug,
+          ).one().count;
+          if (collision === 0) break;
+          const suffix = hashString32(`${session.soulId}:${attempt}`).toString(36).slice(0, 6);
+          slug = `${base.slice(0, Math.max(3, 63 - suffix.length - 1))}-${suffix}`;
+        }
+        this.ctx.storage.sql.exec(
+          "INSERT INTO public_souls(soul_id, slug, enabled_at, disabled_at) VALUES (?, ?, ?, NULL)",
+          session.soulId, slug, now,
+        );
+      }
+      this.recordSoulEvent(session.soulId, "sharing_enabled", now);
+    } else if (existing) {
+      this.ctx.storage.sql.exec("UPDATE public_souls SET disabled_at = ? WHERE soul_id = ?", now, session.soulId);
+      for (const observer of this.sessions.values()) {
+        if (observer.observedSoulId !== session.soulId) continue;
+        observer.observedSoulId = null;
+        observer.observedSlug = null;
+      }
+      this.recordSoulEvent(session.soulId, "sharing_disabled", now);
+    }
+    return {
+      v: PROTOCOL_VERSION,
+      type: "sharingAck",
+      requestId,
+      accepted: true,
+      sharing: this.sharingSummary(session.soulId),
+    };
+  }
+
+  private handleObservePublicSoul(session: SessionRecord, requestId: string, slug: string): ServerMessage {
+    const soul = this.publicSoulView(slug);
+    session.observedSoulId = soul ? this.publicSoulId(slug) : null;
+    session.observedSlug = soul ? slug : null;
+    return { v: PROTOCOL_VERSION, type: "publicSoulContext", requestId, soul };
+  }
+
+  private handlePublicRipple(session: SessionRecord, requestId: string, slug: string, now: number): ServerMessage {
+    const targetSoulId = session.observedSlug === slug ? session.observedSoulId : this.publicSoulId(slug);
+    if (!targetSoulId || !this.publicSoulView(slug)) {
+      return { v: PROTOCOL_VERSION, type: "ritualAck", requestId, accepted: false, reason: "invalid" };
+    }
+    const previousRipple = this.ctx.storage.sql.exec<{ last_at: number }>(`
+      SELECT last_at FROM public_ripple_limits WHERE visitor_soul_id = ? AND slug = ? COLLATE NOCASE
+    `, session.soulId, slug).toArray()[0]?.last_at;
+    if (previousRipple !== undefined && now - previousRipple < 5 * 60 * 1000) {
+      return {
+        v: PROTOCOL_VERSION,
+        type: "ritualAck",
+        requestId,
+        accepted: false,
+        reason: "cooldown",
+        nextOfferingAt: previousRipple + 5 * 60 * 1000,
+      };
+    }
+    this.ctx.storage.sql.exec(`
+      INSERT INTO public_ripple_limits(visitor_soul_id, slug, last_at) VALUES (?, ?, ?)
+      ON CONFLICT(visitor_soul_id, slug) DO UPDATE SET last_at = excluded.last_at
+    `, session.soulId, slug, now);
+    const entity = this.findSoulEntity(targetSoulId);
+    const memory = this.ctx.storage.sql.exec<{ x: number | null; z: number | null }>(`
+      SELECT x, z FROM memories WHERE soul_id = ? ORDER BY completed_at DESC LIMIT 1
+    `, targetSoulId).toArray()[0];
+    const fallback = deterministicMemorialPoint(slug);
+    const sampledPoint = clampNormalizedPoint({
+      x: entity?.x ?? memory?.x ?? fallback.x,
+      z: entity?.z ?? memory?.z ?? fallback.z,
+    }, 0.08);
+    this.pendingRituals.push(this.ritual("ripple", sampledPoint, null, now, 0.5));
+    this.reactToRipple(sampledPoint, now);
+    this.recordSoulEvent(targetSoulId, "public_ripple", now);
+    this.recordSoulEvent(session.soulId, "public_ripple_left", now, { slug });
+    return { v: PROTOCOL_VERSION, type: "ritualAck", requestId, accepted: true, sampledPoint };
+  }
+
+  private publicSoulId(slug: string): string | null {
+    if (!isPublicSlug(slug)) return null;
+    return this.ctx.storage.sql.exec<{ soul_id: string }>(
+      "SELECT soul_id FROM public_souls WHERE slug = ? COLLATE NOCASE AND disabled_at IS NULL",
+      slug,
+    ).toArray()[0]?.soul_id ?? null;
+  }
+
+  private publicSoulView(slug: string): PublicSoulView | null {
+    const row = this.ctx.storage.sql.exec<{
+      soul_id: string;
+      slug: string;
+      poetic_name: string;
+      tint: number;
+      completed_lives: number;
+      dedication: string | null;
+    }>(`
+      SELECT public_souls.soul_id, public_souls.slug, souls.poetic_name, souls.tint,
+        souls.completed_lives, keeper_memberships.dedication
+      FROM public_souls
+      JOIN souls ON souls.id = public_souls.soul_id
+      LEFT JOIN keeper_memberships ON keeper_memberships.soul_id = souls.id
+      WHERE public_souls.slug = ? COLLATE NOCASE AND public_souls.disabled_at IS NULL
+      LIMIT 1
+    `, slug).toArray()[0];
+    if (!row) return null;
+    const now = Date.now();
+    const entity = this.findSoulEntity(row.soul_id);
+    const memory = this.ctx.storage.sql.exec<{
+      completed_at: number;
+      poetic_record: string | null;
+      x: number | null;
+      z: number | null;
+    }>(`
+      SELECT memories.completed_at, lives.poetic_record, memories.x, memories.z
+      FROM memories JOIN lives ON lives.id = memories.life_id
+      WHERE memories.soul_id = ? ORDER BY memories.completed_at DESC LIMIT 1
+    `, row.soul_id).toArray()[0];
+    const status: PublicSoulView["status"] = entity
+      ? entity.memorialPhase === "dome" ? "resting" : "alive"
+      : "remembered";
+    const result: PublicSoulView = {
+      slug: row.slug,
+      name: row.poetic_name,
+      tint: row.tint,
+      status,
+      completedLives: row.completed_lives,
+      dedication: row.dedication ?? undefined,
+    };
+    if (entity && entity.memorialPhase !== "dome" && entity.bornAt !== null) {
+      const point = clampNormalizedPoint({ x: entity.x, z: entity.z }, 0.04);
+      result.currentLife = {
+        kind: entity.lifeKind === "memorial" ? "eternal" : "mortal",
+        ageText: approximateLifeAge(entity.bornAt, now),
+        remainingPassageText: remainingPassage(entity.endsAt, now),
+        presentation: {
+          x: point.x,
+          z: point.z,
+          depth: Math.max(-0.5, Math.min(0.5, entity.depth)),
+          heading: entity.heading,
+          size: entity.size,
+          ageRatio: entity.ageRatio,
+        },
+      };
+    }
+    if (memory) {
+      const fallback = deterministicMemorialPoint(row.slug);
+      result.latestMemorial = {
+        completedAt: memory.completed_at,
+        ageText: memory.poetic_record ?? "one remembered passage",
+        rippleAnchor: clampNormalizedPoint({
+          x: memory.x ?? fallback.x,
+          z: memory.z ?? fallback.z,
+        }, 0.04),
+      };
+    } else if (status === "resting") {
+      result.latestMemorial = {
+        completedAt: entity?.updatedAt ?? now,
+        ageText: entity?.bornAt ? approximateLifeAge(entity.bornAt, now) : "an eternal passage",
+        rippleAnchor: deterministicMemorialPoint(row.slug),
+      };
+    }
+    return result;
+  }
+
+  private letterPreferenceRow(soulId: string): LetterPreferenceRow | null {
+    return this.ctx.storage.sql.exec<LetterPreferenceRow>(
+      "SELECT * FROM pond_letter_preferences WHERE soul_id = ?",
+      soulId,
+    ).toArray()[0] ?? null;
+  }
+
+  private async handleSetPondLetter(
+    session: SessionRecord,
+    message: Extract<ClientMessage, { type: "setPondLetter" }>,
+    now: number,
+  ): Promise<ServerMessage> {
+    const existing = this.letterPreferenceRow(session.soulId);
+    const requestedEmail = message.email === undefined ? null : normalizeEmail(message.email);
+    if (message.email !== undefined && requestedEmail === null) {
+      return {
+        v: PROTOCOL_VERSION,
+        type: "pondLetterAck",
+        requestId: message.requestId,
+        accepted: false,
+        preference: this.letterPreferenceSummary(session.soulId),
+        reason: "invalid_email",
+      };
+    }
+    if ((!emailConfigured(this.env) || !this.env.EMAIL_ENCRYPTION_KEY) && message.email !== undefined) {
+      return {
+        v: PROTOCOL_VERSION,
+        type: "pondLetterAck",
+        requestId: message.requestId,
+        accepted: false,
+        preference: this.letterPreferenceSummary(session.soulId),
+        reason: "not_configured",
+      };
+    }
+
+    let confirmationSent = false;
+    if (requestedEmail !== null) {
+      const emailHash = await keyedEmailHash(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
+      const sameConfirmedEmail = existing?.email_hash === emailHash && existing.status === "confirmed";
+      const samePendingEmail = existing?.email_hash === emailHash && existing.status === "pending";
+      const globallySuppressed = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM email_suppressions WHERE email_hash = ?",
+        emailHash,
+      ).one().count > 0;
+      if (globallySuppressed || existing?.email_hash === emailHash && existing.status === "suppressed") {
+        return {
+          v: PROTOCOL_VERSION,
+          type: "pondLetterAck",
+          requestId: message.requestId,
+          accepted: false,
+          preference: this.letterPreferenceSummary(session.soulId),
+          reason: "suppressed",
+        };
+      }
+      const emailOwner = this.ctx.storage.sql.exec<{ soul_id: string }>(`
+        SELECT soul_id FROM pond_letter_preferences
+        WHERE email_hash = ? AND status IN ('pending', 'confirmed') AND soul_id != ? LIMIT 1
+      `, emailHash, session.soulId).toArray()[0];
+      if (emailOwner) {
+        return {
+          v: PROTOCOL_VERSION,
+          type: "pondLetterAck",
+          requestId: message.requestId,
+          accepted: false,
+          preference: this.letterPreferenceSummary(session.soulId),
+          reason: "email_unavailable",
+        };
+      }
+      if (!sameConfirmedEmail && !samePendingEmail) {
+        if ((existing?.last_confirmation_sent_at ?? 0) + 60 * 1000 > now) {
+          return {
+            v: PROTOCOL_VERSION,
+            type: "pondLetterAck",
+            requestId: message.requestId,
+            accepted: false,
+            preference: this.letterPreferenceSummary(session.soulId),
+            reason: "rate_limited",
+          };
+        }
+        const encrypted = await encryptText(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
+        const consentVersion = (existing?.consent_version ?? 0) + 1;
+        this.ctx.storage.sql.exec(`
+          INSERT INTO pond_letter_preferences(
+            soul_id, email_ciphertext, email_iv, email_hash, email_masked, encryption_version,
+            status, consent_version, mortal_letters_enabled, keeper_letters_enabled,
+            requested_at, confirmed_at, unsubscribed_at, last_confirmation_sent_at
+          ) VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, NULL, NULL, ?)
+          ON CONFLICT(soul_id) DO UPDATE SET
+            email_ciphertext = excluded.email_ciphertext,
+            email_iv = excluded.email_iv,
+            email_hash = excluded.email_hash,
+            email_masked = excluded.email_masked,
+            encryption_version = 1,
+            status = 'pending',
+            consent_version = excluded.consent_version,
+            mortal_letters_enabled = excluded.mortal_letters_enabled,
+            keeper_letters_enabled = excluded.keeper_letters_enabled,
+            requested_at = excluded.requested_at,
+            confirmed_at = NULL,
+            unsubscribed_at = NULL,
+            last_confirmation_sent_at = excluded.last_confirmation_sent_at
+        `,
+        session.soulId, encrypted.ciphertext, encrypted.iv, emailHash, maskEmail(requestedEmail), consentVersion,
+        message.mortalLetters === false ? 0 : 1,
+        message.keeperLetters === true ? 1 : 0,
+        now, now);
+        this.ctx.storage.sql.exec(
+          "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND consumed_at IS NULL",
+          now, session.soulId,
+        );
+        const { token } = await this.createSecureClaim(session.soulId, "confirm_email", consentVersion, null, now + GROWTH_DAY_MS, now);
+        const deliveryId = this.createEmailDelivery(
+          `confirmation:${session.soulId}:${consentVersion}:${now}`,
+          session.soulId,
+          "confirmation",
+          null,
+          null,
+          "pending",
+          now,
+        );
+        confirmationSent = await this.sendEmailDelivery(deliveryId, token);
+      }
+    }
+
+    const current = this.letterPreferenceRow(session.soulId);
+    if (current && (message.mortalLetters !== undefined || message.keeperLetters !== undefined)) {
+      this.ctx.storage.sql.exec(`
+        UPDATE pond_letter_preferences SET
+          mortal_letters_enabled = COALESCE(?, mortal_letters_enabled),
+          keeper_letters_enabled = COALESCE(?, keeper_letters_enabled)
+        WHERE soul_id = ?
+      `,
+      message.mortalLetters === undefined ? null : message.mortalLetters ? 1 : 0,
+      message.keeperLetters === undefined ? null : message.keeperLetters ? 1 : 0,
+      session.soulId);
+      if (message.keeperLetters !== undefined) {
+        this.ctx.storage.sql.exec(
+          "UPDATE keeper_memberships SET weekly_letters_enabled = ?, updated_at = ? WHERE soul_id = ?",
+          message.keeperLetters ? 1 : 0, now, session.soulId,
+        );
+      }
+    }
+    return {
+      v: PROTOCOL_VERSION,
+      type: "pondLetterAck",
+      requestId: message.requestId,
+      accepted: true,
+      preference: this.letterPreferenceSummary(session.soulId),
+      confirmationSent,
+      reason: requestedEmail === null && !current ? "unchanged" : undefined,
+    };
+  }
+
+  private async handleResendPondLetterConfirmation(session: SessionRecord, requestId: string, now: number): Promise<ServerMessage> {
+    const preference = this.letterPreferenceRow(session.soulId);
+    if (!preference || preference.status !== "pending" || !preference.email_ciphertext) {
+      return {
+        v: PROTOCOL_VERSION,
+        type: "pondLetterAck",
+        requestId,
+        accepted: false,
+        preference: this.letterPreferenceSummary(session.soulId),
+        reason: "unchanged",
+      };
+    }
+    if ((preference.last_confirmation_sent_at ?? 0) + 10 * 60 * 1000 > now) {
+      return {
+        v: PROTOCOL_VERSION,
+        type: "pondLetterAck",
+        requestId,
+        accepted: false,
+        preference: this.letterPreferenceSummary(session.soulId),
+        reason: "rate_limited",
+      };
+    }
+    this.ctx.storage.sql.exec(
+      "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND purpose = 'confirm_email' AND consumed_at IS NULL",
+      now, session.soulId,
+    );
+    const { token } = await this.createSecureClaim(
+      session.soulId,
+      "confirm_email",
+      preference.consent_version,
+      null,
+      now + GROWTH_DAY_MS,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      "UPDATE pond_letter_preferences SET last_confirmation_sent_at = ? WHERE soul_id = ?",
+      now, session.soulId,
+    );
+    const deliveryId = this.createEmailDelivery(
+      `confirmation:${session.soulId}:${preference.consent_version}:${now}`,
+      session.soulId,
+      "confirmation",
+      null,
+      null,
+      "pending",
+      now,
+    );
+    const confirmationSent = await this.sendEmailDelivery(deliveryId, token);
+    return {
+      v: PROTOCOL_VERSION,
+      type: "pondLetterAck",
+      requestId,
+      accepted: true,
+      preference: this.letterPreferenceSummary(session.soulId),
+      confirmationSent,
+    };
+  }
+
+  private handleUnsubscribePondLetters(session: SessionRecord, requestId: string, now: number): ServerMessage {
+    const current = this.letterPreferenceRow(session.soulId);
+    if (current) {
+      this.ctx.storage.sql.exec(`
+        UPDATE pond_letter_preferences SET status = 'unsubscribed', consent_version = consent_version + 1,
+          mortal_letters_enabled = 0, keeper_letters_enabled = 0, unsubscribed_at = ?
+        WHERE soul_id = ?
+      `, now, session.soulId);
+      this.ctx.storage.sql.exec(
+        "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND consumed_at IS NULL",
+        now, session.soulId,
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = 'skipped', failure_code = 'unsubscribed' WHERE soul_id = ? AND status IN ('pending', 'waiting_confirmation')",
+        session.soulId,
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE keeper_memberships SET weekly_letters_enabled = 0, updated_at = ? WHERE soul_id = ?",
+        now, session.soulId,
+      );
+    }
+    return {
+      v: PROTOCOL_VERSION,
+      type: "pondLetterAck",
+      requestId,
+      accepted: Boolean(current),
+      preference: this.letterPreferenceSummary(session.soulId),
+      reason: current ? undefined : "unchanged",
+    };
+  }
+
+  private async createSecureClaim(
+    soulId: string,
+    purpose: "confirm_email" | "return_soul" | "unsubscribe",
+    consentVersion: number,
+    lifeId: string | null,
+    expiresAt: number | null,
+    now: number,
+  ): Promise<{ token: string; tokenHash: string }> {
+    const token = randomToken();
+    const tokenHash = await sha256Hex(token);
+    this.ctx.storage.sql.exec(`
+      INSERT INTO secure_link_claims(token_hash, soul_id, purpose, consent_version, life_id, expires_at, consumed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+    `, tokenHash, soulId, purpose, consentVersion, lifeId, expiresAt, now);
+    return { token, tokenHash };
+  }
+
+  private createEmailDelivery(
+    dedupeKey: string,
+    soulId: string,
+    kind: EmailDeliveryRow["delivery_kind"],
+    lifeId: string | null,
+    membershipId: string | null,
+    status: string,
+    now: number,
+  ): string {
+    const id = crypto.randomUUID();
+    this.ctx.storage.sql.exec(`
+      INSERT OR IGNORE INTO email_deliveries(
+        id, dedupe_key, soul_id, delivery_kind, life_id, membership_id, status, due_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, dedupeKey, soulId, kind, lifeId, membershipId, status, now, now);
+    return this.ctx.storage.sql.exec<{ id: string }>(
+      "SELECT id FROM email_deliveries WHERE dedupe_key = ?",
+      dedupeKey,
+    ).one().id;
+  }
+
+  private queueMortalLetter(soulId: string, lifeId: string, now: number): void {
+    const preference = this.letterPreferenceRow(soulId);
+    let status = "skipped";
+    if (preference?.mortal_letters_enabled === 1) {
+      if (preference.status === "confirmed") status = "pending";
+      else if (preference.status === "pending") status = "waiting_confirmation";
+      else if (preference.status === "suppressed") status = "suppressed";
+    }
+    this.createEmailDelivery(
+      `mortal-death:${lifeId}`,
+      soulId,
+      "mortal_death",
+      lifeId,
+      null,
+      status,
+      now,
+    );
+  }
+
+  private emailLink(soulId: string, claim: string): string {
+    const origin = String(this.env.PUBLIC_APP_ORIGIN || "").replace(/\/$/u, "");
+    const sharing = this.sharingSummary(soulId);
+    const path = sharing.enabled && sharing.slug ? `/s/${sharing.slug}` : "/";
+    return `${origin}${path}#pond=${encodeURIComponent(claim)}`;
+  }
+
+  private async sendEmailDelivery(deliveryId: string, existingPrimaryClaim?: string): Promise<boolean> {
+    const row = this.ctx.storage.sql.exec<EmailDeliveryRow>(
+      "SELECT * FROM email_deliveries WHERE id = ?",
+      deliveryId,
+    ).toArray()[0];
+    if (!row || row.status !== "pending") return false;
+    const preference = this.letterPreferenceRow(row.soul_id);
+    const correctConsent = preference?.status === "confirmed"
+      || (row.delivery_kind === "confirmation" && preference?.status === "pending");
+    const kindEnabled = row.delivery_kind === "confirmation"
+      || row.delivery_kind === "mortal_death" && preference?.mortal_letters_enabled === 1
+      || row.delivery_kind === "keeper_weekly" && preference?.keeper_letters_enabled === 1;
+    if (!preference?.email_ciphertext || !preference.email_iv || !correctConsent || !kindEnabled) {
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = ?, failure_code = ? WHERE id = ? AND status = 'pending'",
+        preference?.status === "suppressed" ? "suppressed" : "skipped", "consent_inactive", row.id,
+      );
+      return false;
+    }
+
+    const now = Date.now();
+    const marked = this.ctx.storage.sql.exec(`
+      UPDATE email_deliveries SET status = 'sending', attempted_at = ?
+      WHERE id = ? AND status = 'pending' RETURNING id
+    `, now, row.id).toArray();
+    if (marked.length === 0) return false;
+
+    let providerCallStarted = false;
+    try {
+      let primaryClaim = existingPrimaryClaim;
+      if (!primaryClaim) {
+        const purpose = row.delivery_kind === "confirmation" ? "confirm_email" : "return_soul";
+        const expiry = now + (purpose === "confirm_email" ? GROWTH_DAY_MS : 30 * GROWTH_DAY_MS);
+        primaryClaim = (await this.createSecureClaim(
+          row.soul_id,
+          purpose,
+          preference.consent_version,
+          row.life_id,
+          expiry,
+          now,
+        )).token;
+      }
+      const unsubscribeClaim = (await this.createSecureClaim(
+        row.soul_id,
+        "unsubscribe",
+        preference.consent_version,
+        null,
+        null,
+        now,
+      )).token;
+      const recipient = await decryptText({
+        ciphertext: preference.email_ciphertext,
+        iv: preference.email_iv,
+        version: 1,
+      }, this.env.EMAIL_ENCRYPTION_KEY);
+      const soul = this.ctx.storage.sql.exec<{ poetic_name: string }>(
+        "SELECT poetic_name FROM souls WHERE id = ?",
+        row.soul_id,
+      ).one();
+      const primaryUrl = this.emailLink(row.soul_id, primaryClaim);
+      const unsubscribeUrl = this.emailLink(row.soul_id, unsubscribeClaim);
+      const safeName = escapeHtml(soul.poetic_name);
+      let subject = "A letter from the Eternal Pond";
+      let opening = `${soul.poetic_name} is remembered by the pond.`;
+      if (row.delivery_kind === "confirmation") {
+        subject = "Confirm your Pond Letters";
+        opening = `Let the pond know where to write about ${soul.poetic_name}.`;
+      } else if (row.delivery_kind === "keeper_weekly") {
+        subject = `A quiet week with ${soul.poetic_name}`;
+        opening = this.keeperWeeklyNote(row.soul_id);
+      }
+      const action = row.delivery_kind === "confirmation" ? "Confirm Pond Letters" : "Return to the pond";
+      providerCallStarted = true;
+      const result = await sendPondEmail(this.env, {
+        to: recipient,
+        subject,
+        text: `${opening}\n\n${action}: ${primaryUrl}\n\nStop Pond Letters: ${unsubscribeUrl}`,
+        html: `<p>${escapeHtml(opening)}</p><p><a href="${escapeHtml(primaryUrl)}">${action}</a></p><p><small><a href="${escapeHtml(unsubscribeUrl)}">Stop Pond Letters</a></small></p><span style="display:none">${safeName}</span>`,
+        idempotencyKey: row.dedupe_key,
+        tags: [{ name: "kind", value: row.delivery_kind }],
+      });
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = 'sent', sent_at = ?, provider_id = ? WHERE id = ? AND status = 'sending'",
+        Date.now(), result.providerId, row.id,
+      );
+      const storedOutcome = this.ctx.storage.sql.exec<{ event_type: string; received_at: number; bounce_type: string | null }>(`
+        SELECT event_type, received_at, bounce_type FROM resend_webhook_events
+        WHERE provider_id = ? ORDER BY received_at DESC LIMIT 1
+      `, result.providerId).toArray()[0];
+      if (storedOutcome) {
+        this.applyResendOutcome(
+          result.providerId,
+          storedOutcome.event_type,
+          storedOutcome.received_at,
+          storedOutcome.bounce_type,
+        );
+      }
+      return true;
+    } catch {
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = 'failed', failure_code = ? WHERE id = ? AND status = 'sending'",
+        providerCallStarted ? "provider_call_failed" : "delivery_preparation_failed", row.id,
+      );
+      return false;
+    }
+  }
+
+  private keeperWeeklyNote(soulId: string): string {
+    const recent = this.ctx.storage.sql.exec<{ event_kind: string; event_at: number }>(
+      "SELECT event_kind, event_at FROM soul_events WHERE soul_id = ? AND event_at >= ? ORDER BY event_at DESC LIMIT 1",
+      soulId, Date.now() - 7 * GROWTH_DAY_MS,
+    ).toArray()[0];
+    if (recent?.event_kind === "public_ripple") return "Someone left a quiet ripple beside this soul.";
+    if (recent?.event_kind === "life_started") return "A new passage began for this soul in the pond.";
+    if (recent?.event_kind === "life_ended") return "The pond carried this soul's mortal passage into memory.";
+    if (recent?.event_kind === "keeper_consecrated") return "This soul entered its eternal passage without losing its place in the water.";
+    if (recent?.event_kind === "sharing_enabled") return "A quiet path to this soul was opened beyond the pond.";
+    const entity = this.findSoulEntity(soulId);
+    if (entity?.memorialPhase === "dome") return "This eternal soul is resting beneath the memorial dome.";
+    const phase = orbitPhaseAt(Date.now(), this.orbitEpoch);
+    return phase > 0.2 && phase < 0.8
+      ? "This eternal soul moved beneath a bright turning sky."
+      : "This eternal soul moved through the pond under a dark turning sky.";
+  }
+
+  private async drainEmailOutbox(): Promise<void> {
+    const due = this.ctx.storage.sql.exec<{ id: string }>(`
+      SELECT id FROM email_deliveries WHERE status = 'pending' AND due_at <= ? ORDER BY due_at, created_at LIMIT 8
+    `, Date.now()).toArray();
+    for (const row of due) await this.sendEmailDelivery(row.id);
   }
 
   private handleIncarnate(session: SessionRecord, requestId: string, point: NormalizedPoint, now: number): ServerMessage[] {
@@ -971,6 +1846,9 @@ export class PondCoreV2 extends DurableObject<Env> {
     }
     const existing = this.findSoulEntity(session.soulId);
     if (existing) {
+      if (existing.lifeKind === "memorial" && existing.memorialPhase === "dome") {
+        return [{ v: PROTOCOL_VERSION, type: "ritualAck", requestId, accepted: false, reason: "keeper_resting" }];
+      }
       if (this.foregroundSoulCount() < this.capacityLimit || existing.foreground) {
         existing.foreground = true;
         existing.updatedAt = now;
@@ -1004,10 +1882,11 @@ export class PondCoreV2 extends DurableObject<Env> {
       this.enqueue(queued);
       return [this.queueMessage(queued, requestId)];
     }
-    this.birthSoulFish(session, safePoint, now);
+    const born = this.birthSoulFish(session, safePoint, now);
     this.pendingRituals.push(this.ritual("birth", safePoint, session.soulId, now, 0.8));
     return [
       { v: PROTOCOL_VERSION, type: "ritualAck", requestId, accepted: true, sampledPoint: safePoint },
+      this.lifeStartedMessage(born, requestId),
       { v: PROTOCOL_VERSION, type: "snapshot", requestId, snapshot: this.snapshot(now) },
       {
         v: PROTOCOL_VERSION,
@@ -1034,8 +1913,32 @@ export class PondCoreV2 extends DurableObject<Env> {
     this.entities.set(entity.id, entity);
     this.persistEntity(entity);
     session.entityId = entity.id;
+    this.recordSoulEvent(soul.id, "life_started", now, { lifeKind: "mortal" });
     this.track("birth");
     return entity;
+  }
+
+  private lifeStartedMessage(entity: SimEntity, requestId: string): ServerMessage {
+    const completedLives = this.ctx.storage.sql.exec<{ completed_lives: number }>(
+      "SELECT completed_lives FROM souls WHERE id = ?",
+      entity.soulId,
+    ).toArray()[0]?.completed_lives ?? 0;
+    return {
+      v: PROTOCOL_VERSION,
+      type: "lifeStarted",
+      requestId,
+      life: {
+        lifeId: entity.lifeId ?? "",
+        entityId: entity.id,
+        name: entity.label ?? "A quiet soul",
+        lifeKind: entity.lifeKind === "memorial" ? "eternal" : "mortal",
+        status: entity.memorialPhase === "dome" ? "resting" : "living",
+        bornAt: entity.bornAt ?? Date.now(),
+        endsAt: entity.endsAt,
+        memorialPhase: entity.memorialPhase ?? undefined,
+      },
+      reincarnation: completedLives > 0,
+    };
   }
 
   private samplePoint(point: NormalizedPoint, soulId: string, requestId: string): NormalizedPoint {
@@ -1234,8 +2137,13 @@ export class PondCoreV2 extends DurableObject<Env> {
           transitionStartedAt: now,
           transitionEndsAt: now + 900,
         };
-      } else if (entity.kind === "bird" && entity.state.mode !== "circling") {
-        entity.state = { ...entity.state, mode: "circling", transitionStartedAt: now, transitionEndsAt: now + 1_800 };
+      } else if (entity.kind === "bird") {
+        const takingOff = startBirdTakeoff(entity, now);
+        if (takingOff !== entity) {
+          this.entities.set(takingOff.id, takingOff);
+          this.persistEntity(takingOff);
+        }
+        continue;
       }
       entity.updatedAt = now;
     }
@@ -1291,35 +2199,6 @@ export class PondCoreV2 extends DurableObject<Env> {
     this.activateNature(this.natureEvent("frog_hop", { x: frog.x, z: frog.z }, now, duration, [frog.id], 0.6, { x: frog.x, z: frog.z }, anchor), true);
   }
 
-  private transitionBird(now: number, seed: number): void {
-    const bird = this.selectEntity("bird", seed);
-    if (!bird) return;
-    const current = bird.state.mode ?? "circling";
-    const nextMode = current === "circling" ? "foraging" : current === "foraging" ? "perched" : "circling";
-    const anchorIndex = (seed >>> 9) % BIRD_PERCH_ANCHORS.length;
-    let target: NormalizedPoint = BIRD_PERCH_ANCHORS[anchorIndex] ?? BIRD_PERCH_ANCHORS[0];
-    if (nextMode === "foraging") {
-      const angle = ((seed >>> 3) % 6283) / 1000;
-      target = { x: 0.5 + Math.cos(angle) * 0.472, z: 0.5 + Math.sin(angle) * 0.472 };
-    } else if (nextMode === "circling") {
-      const radius = 0.34 + ((bird.seed >>> 6) % 55) / 1000;
-      const angle = (now / 1000) * (0.055 + bird.speed * 6) + (bird.seed % 6283) / 1000;
-      target = { x: 0.5 + Math.cos(angle) * radius, z: 0.5 + Math.sin(angle) * radius };
-    }
-    const duration = 3_400;
-    bird.state = {
-      ...bird.state,
-      mode: nextMode,
-      targetAnchor: anchorIndex,
-      transitionFrom: { x: bird.x, z: bird.z },
-      transitionTo: target,
-      transitionStartedAt: now,
-      transitionEndsAt: now + duration,
-    };
-    bird.updatedAt = now;
-    this.activateNature(this.natureEvent("bird_transition", { x: bird.x, z: bird.z }, now, duration, [bird.id], 0.55, { x: bird.x, z: bird.z }, target), true);
-  }
-
   private maybeStartSoulPredation(now: number, seed: number): void {
     if (now - this.lastSoulPredationAt < SOUL_PREDATION_COOLDOWN_MS) return;
     const random = mulberry32(seed ^ 0x74a6c9d1);
@@ -1360,7 +2239,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     } else if (choice === 3) {
       this.transitionFrog(now, seed);
     } else if (choice === 4) {
-      this.transitionBird(now, seed);
+      this.activateNature(this.natureEvent("water_disturbance", point, now, 4_000, [], 0.4), true);
     } else if (choice === 5) {
       const from = { x: 0.08, z: point.z };
       const to = { x: 0.92, z: 1 - point.z };
@@ -1483,12 +2362,18 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (queueIndex >= 0) this.queue.splice(queueIndex, 1);
     const hasAnotherSession = [...this.sessions.values()].some((candidate) => candidate.soulId === session.soulId);
     if (!hasAnotherSession) {
+      const disconnectedAt = Date.now();
+      this.ctx.storage.sql.exec("UPDATE souls SET last_seen_at = ? WHERE id = ?", disconnectedAt, session.soulId);
+      this.ctx.storage.sql.exec(
+        "UPDATE soul_visits SET last_seen_at = MAX(last_seen_at, ?) WHERE soul_id = ? AND day = ?",
+        disconnectedAt, session.soulId, utcDay(disconnectedAt),
+      );
       const entity = this.findSoulEntity(session.soulId);
       if (entity) {
         entity.foreground = false;
-        entity.updatedAt = Date.now();
+        entity.updatedAt = disconnectedAt;
         this.persistEntity(entity);
-        this.pendingRituals.push(this.ritual("departure", { x: entity.x, z: entity.z }, session.soulId, Date.now(), 0.2));
+        this.pendingRituals.push(this.ritual("departure", { x: entity.x, z: entity.z }, session.soulId, disconnectedAt, 0.2));
       }
     }
     this.rebuildGatewaySet();
@@ -1526,6 +2411,10 @@ export class PondCoreV2 extends DurableObject<Env> {
 
     const advanced: SimEntity[] = [];
     for (const entity of this.entities.values()) {
+      if (isNaturalLifeComplete(entity, now)) {
+        completed.push({ entity, message: this.completeLife(entity, now) });
+        continue;
+      }
       if (entity.soulId && !entity.foreground) continue;
       advanced.push(advanceEntity(entity, this.sequence, dtSeconds, now));
     }
@@ -1543,6 +2432,10 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (now - this.lastPresenceAt >= 1000) {
       this.lastPresenceAt = now;
       await this.broadcastPresence(now);
+    }
+    if (this.sequence % 600 === 0) {
+      this.processKeeperStates(now);
+      this.ctx.waitUntil(this.drainEmailOutbox());
     }
     if (now - this.lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) this.checkpoint();
   }
@@ -1566,9 +2459,11 @@ export class PondCoreV2 extends DurableObject<Env> {
     this.ctx.storage.sql.exec("UPDATE lives SET ended_at = ?, poetic_record = ? WHERE id = ? AND ended_at IS NULL", now, record, entity.lifeId);
     this.ctx.storage.sql.exec("UPDATE souls SET completed_lives = completed_lives + 1 WHERE id = ?", entity.soulId);
     this.ctx.storage.sql.exec(
-      "INSERT INTO memories(id, soul_id, life_id, display_name, tint, life_kind, completed_at) VALUES (?, ?, ?, ?, ?, 'mortal', ?)",
-      memoryId, entity.soulId, entity.lifeId, soul.poetic_name, soul.tint, now,
+      "INSERT INTO memories(id, soul_id, life_id, display_name, tint, life_kind, completed_at, x, z) VALUES (?, ?, ?, ?, ?, 'mortal', ?, ?, ?)",
+      memoryId, entity.soulId, entity.lifeId, soul.poetic_name, soul.tint, now, entity.x, entity.z,
     );
+    this.recordSoulEvent(entity.soulId, "life_ended", now, { lifeKind: "mortal" });
+    this.queueMortalLetter(entity.soulId, entity.lifeId, now);
     this.ctx.storage.sql.exec("DELETE FROM entities WHERE id = ?", entity.id);
     this.entities.delete(entity.id);
     this.removedSinceDelta.add(entity.id);
@@ -1583,6 +2478,16 @@ export class PondCoreV2 extends DurableObject<Env> {
       completedAt: now,
       ageText: record,
       memoryId,
+      memory: {
+        id: memoryId,
+        soulId: entity.soulId,
+        name: soul.poetic_name,
+        tint: soul.tint,
+        completedAt: now,
+        lifeKind: "mortal",
+        x: entity.x,
+        z: entity.z,
+      },
     };
   }
 
@@ -1599,7 +2504,10 @@ export class PondCoreV2 extends DurableObject<Env> {
       const sessions = [...this.sessions.values()].filter((session) => session.soulId === entity.soulId);
       await Promise.all(sessions.map((session) => this.gateway(session.gatewayShard).deliverToSession(session.sessionId, [message])));
     }
-    if (completed.length > 0) await this.processQueue();
+    if (completed.length > 0) {
+      await this.processQueue();
+      this.ctx.waitUntil(this.drainEmailOutbox());
+    }
   }
 
   private maybeCreateLegendary(now: number): void {
@@ -1691,21 +2599,25 @@ export class PondCoreV2 extends DurableObject<Env> {
       const session = this.sessions.get(entry.sessionId);
       if (!session || session.renderer === "canvas") continue;
       const existing = this.findSoulEntity(entry.soulId);
+      let born: SimEntity | null = null;
       if (existing) {
         existing.foreground = true;
         existing.updatedAt = Date.now();
         session.entityId = existing.id;
         this.persistEntity(existing);
       } else {
-        const born = this.birthSoulFish(session, entry.point, Date.now());
+        born = this.birthSoulFish(session, entry.point, Date.now());
         this.pendingRituals.push(this.ritual("birth", { x: born.x, z: born.z }, entry.soulId, Date.now(), 0.8));
       }
-      await this.gateway(entry.gatewayShard).deliverToSession(entry.sessionId, [{
-        v: PROTOCOL_VERSION,
-        type: "snapshot",
-        requestId: entry.requestId,
-        snapshot: this.snapshot(),
-      }]);
+      const messages: ServerMessage[] = [];
+      if (born) messages.push(this.lifeStartedMessage(born, entry.requestId));
+      messages.push({
+          v: PROTOCOL_VERSION,
+          type: "snapshot",
+          requestId: entry.requestId,
+          snapshot: this.snapshot(),
+        });
+      await this.gateway(entry.gatewayShard).deliverToSession(entry.sessionId, messages);
     }
     await Promise.all(this.queue.map((entry) => this.gateway(entry.gatewayShard).deliverToSession(entry.sessionId, [this.queueMessage(entry, entry.requestId)])));
   }
@@ -1739,6 +2651,10 @@ export class PondCoreV2 extends DurableObject<Env> {
       this.timer = null;
     }
     this.checkpoint();
+    await this.rescheduleAlarm();
+  }
+
+  private async rescheduleAlarm(): Promise<void> {
     const now = Date.now();
     const nextLifeEnd = [...this.entities.values()]
       .map((entity) => entity.endsAt)
@@ -1748,7 +2664,25 @@ export class PondCoreV2 extends DurableObject<Env> {
       "SELECT due_at FROM scheduled_events WHERE completed_at IS NULL AND due_at > ? ORDER BY due_at LIMIT 1",
       now,
     ).toArray()[0]?.due_at;
-    const alarmAt = Math.min(nextLifeEnd ?? Number.MAX_SAFE_INTEGER, nextScheduled ?? Number.MAX_SAFE_INTEGER, now + 6 * 60 * 60 * 1000);
+    const nextEmail = this.ctx.storage.sql.exec<{ due_at: number }>(
+      "SELECT due_at FROM email_deliveries WHERE status = 'pending' ORDER BY due_at LIMIT 1",
+    ).toArray()[0]?.due_at;
+    const nextKeeper = this.ctx.storage.sql.exec<{ due_at: number }>(`
+      SELECT MIN(due_at) AS due_at FROM (
+        SELECT paid_through_at AS due_at FROM keeper_memberships
+          WHERE activated_at IS NOT NULL AND rested_at IS NULL AND paid_through_at > ?
+        UNION ALL
+        SELECT next_weekly_letter_at AS due_at FROM keeper_memberships
+          WHERE next_weekly_letter_at > ?
+      )
+    `, now, now).toArray()[0]?.due_at;
+    const alarmAt = Math.min(
+      nextLifeEnd ?? Number.MAX_SAFE_INTEGER,
+      nextScheduled ?? Number.MAX_SAFE_INTEGER,
+      nextEmail ?? Number.MAX_SAFE_INTEGER,
+      nextKeeper ?? Number.MAX_SAFE_INTEGER,
+      now + 6 * 60 * 60 * 1000,
+    );
     await this.ctx.storage.setAlarm(Math.max(now + 60_000, alarmAt));
   }
 
@@ -1763,9 +2697,12 @@ export class PondCoreV2 extends DurableObject<Env> {
       if (next.kind === "legendaryPenguin" && next.endsAt !== null && next.endsAt <= now) this.removeWildEntity(next.id);
     }
     await this.deliverLifeEndings(completed);
+    this.processKeeperStates(now);
+    await this.drainEmailOutbox();
     this.lastTickAt = now;
     this.checkpoint();
     if (this.sessions.size === 0) await this.sleepWorld();
+    else await this.rescheduleAlarm();
   }
 
   private track(event: string, quality = 0): void {
@@ -1774,6 +2711,693 @@ export class PondCoreV2 extends DurableObject<Env> {
       INSERT INTO analytics_daily(day, event, count, quality_sum) VALUES (?, ?, 1, ?)
       ON CONFLICT(day, event) DO UPDATE SET count = count + 1, quality_sum = quality_sum + excluded.quality_sum
     `, day, event, quality);
+  }
+
+  async getPublicSoul(input: { slug: string }): Promise<PublicSoulView | null> {
+    return this.publicSoulView(input.slug);
+  }
+
+  async inspectSecureLink(input: { claim: string }): Promise<LinkInspection> {
+    if (input.claim.length < 20 || input.claim.length > 256) return { valid: false };
+    const tokenHash = await sha256Hex(input.claim);
+    const row = this.ctx.storage.sql.exec<{
+      purpose: "confirm_email" | "return_soul" | "unsubscribe";
+      soul_id: string;
+      expires_at: number | null;
+      consent_version: number;
+      consumed_at: number | null;
+      poetic_name: string;
+      current_consent_version: number | null;
+      slug: string | null;
+      disabled_at: number | null;
+    }>(`
+      SELECT secure_link_claims.purpose, secure_link_claims.soul_id, secure_link_claims.expires_at,
+        secure_link_claims.consent_version, secure_link_claims.consumed_at, souls.poetic_name,
+        pond_letter_preferences.consent_version AS current_consent_version,
+        public_souls.slug, public_souls.disabled_at
+      FROM secure_link_claims
+      JOIN souls ON souls.id = secure_link_claims.soul_id
+      LEFT JOIN pond_letter_preferences ON pond_letter_preferences.soul_id = souls.id
+      LEFT JOIN public_souls ON public_souls.soul_id = souls.id
+      WHERE secure_link_claims.token_hash = ?
+    `, tokenHash).toArray()[0];
+    const now = Date.now();
+    if (!row || row.consumed_at !== null || row.current_consent_version !== row.consent_version
+      || row.expires_at !== null && row.expires_at <= now) return { valid: false };
+    return {
+      valid: true,
+      purpose: row.purpose,
+      name: row.poetic_name,
+      slug: row.disabled_at === null ? row.slug ?? undefined : undefined,
+      expiresAt: row.expires_at ?? undefined,
+    };
+  }
+
+  async redeemSecureLink(input: { claim: string; currentToken?: string }): Promise<LinkRedemption> {
+    const inspected = await this.inspectSecureLink({ claim: input.claim });
+    if (!inspected.valid) return { ok: false, message: "invalid_or_expired" };
+    const tokenHash = await sha256Hex(input.claim);
+    const claim = this.ctx.storage.sql.exec<{
+      soul_id: string;
+      purpose: "confirm_email" | "return_soul" | "unsubscribe";
+      consent_version: number;
+    }>(`
+      SELECT soul_id, purpose, consent_version FROM secure_link_claims
+      WHERE token_hash = ? AND consumed_at IS NULL
+    `, tokenHash).toArray()[0];
+    if (!claim) return { ok: false, message: "invalid_or_expired" };
+    if (input.currentToken) {
+      const currentSoul = this.findSoulByTokenHash(await sha256Hex(input.currentToken));
+      if (currentSoul && currentSoul.id !== claim.soul_id) {
+        return {
+          ok: false,
+          purpose: claim.purpose,
+          name: inspected.name,
+          slug: inspected.slug,
+          message: "switch_required",
+        };
+      }
+    }
+
+    const now = Date.now();
+    let issuedToken: string | undefined;
+    let issuedHash: string | undefined;
+    if (claim.purpose === "return_soul") {
+      issuedToken = makeToken();
+      issuedHash = await sha256Hex(issuedToken);
+    }
+    const consumed = this.ctx.storage.sql.exec(`
+      UPDATE secure_link_claims SET consumed_at = ?
+      WHERE token_hash = ? AND consumed_at IS NULL
+      RETURNING soul_id
+    `, now, tokenHash).toArray();
+    if (consumed.length === 0) return { ok: false, message: "already_used" };
+
+    if (claim.purpose === "confirm_email") {
+      this.ctx.storage.sql.exec(`
+        UPDATE pond_letter_preferences SET status = 'confirmed', confirmed_at = ?, unsubscribed_at = NULL
+        WHERE soul_id = ? AND consent_version = ? AND status = 'pending'
+      `, now, claim.soul_id, claim.consent_version);
+      this.ctx.storage.sql.exec(`
+        UPDATE email_deliveries SET status = 'pending', due_at = ?
+        WHERE soul_id = ? AND status = 'waiting_confirmation' AND delivery_kind = 'mortal_death'
+      `, now, claim.soul_id);
+      this.recordSoulEvent(claim.soul_id, "email_confirmed", now);
+      this.ctx.waitUntil(this.drainEmailOutbox());
+    } else if (claim.purpose === "return_soul" && issuedToken && issuedHash) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO soul_credentials(id, soul_id, token_hash, created_at, last_used_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)",
+        crypto.randomUUID(), claim.soul_id, issuedHash, now, now,
+      );
+      this.recordSoulEvent(claim.soul_id, "credential_recovered", now);
+    } else if (claim.purpose === "unsubscribe") {
+      this.ctx.storage.sql.exec(`
+        UPDATE pond_letter_preferences SET status = 'unsubscribed', consent_version = consent_version + 1,
+          mortal_letters_enabled = 0, keeper_letters_enabled = 0, unsubscribed_at = ?
+        WHERE soul_id = ? AND consent_version = ?
+      `, now, claim.soul_id, claim.consent_version);
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = 'skipped', failure_code = 'unsubscribed' WHERE soul_id = ? AND status IN ('pending', 'waiting_confirmation')",
+        claim.soul_id,
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE keeper_memberships SET weekly_letters_enabled = 0, updated_at = ? WHERE soul_id = ?",
+        now, claim.soul_id,
+      );
+    }
+    return {
+      ok: true,
+      purpose: claim.purpose,
+      name: inspected.name,
+      slug: inspected.slug,
+      token: issuedToken,
+    };
+  }
+
+  async applyResendWebhook(input: {
+    webhookId: string;
+    eventType: string;
+    providerId: string | null;
+    eventCreatedAt: number;
+    receivedAt: number;
+    bounceType?: string | null;
+  }): Promise<{ duplicate: boolean }> {
+    const duplicate = this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM resend_webhook_events WHERE id = ?",
+      input.webhookId,
+    ).one().count > 0;
+    if (duplicate) return { duplicate: true };
+    this.ctx.storage.sql.exec(
+      "INSERT INTO resend_webhook_events(id, event_type, provider_id, received_at, bounce_type) VALUES (?, ?, ?, ?, ?)",
+      input.webhookId, input.eventType, input.providerId, input.receivedAt, input.bounceType ?? null,
+    );
+    if (input.providerId) {
+      this.applyResendOutcome(input.providerId, input.eventType, input.receivedAt, input.bounceType);
+    }
+    return { duplicate: false };
+  }
+
+  private applyResendOutcome(providerId: string, eventType: string, at: number, bounceType?: string | null): void {
+    if (eventType === "email.delivered") {
+      this.ctx.storage.sql.exec(
+        "UPDATE email_deliveries SET status = 'delivered', delivered_at = ? WHERE provider_id = ? AND status IN ('sent', 'sending')",
+        at, providerId,
+      );
+      return;
+    }
+    if (eventType !== "email.bounced" && eventType !== "email.complained") return;
+    const delivery = this.ctx.storage.sql.exec<{ soul_id: string }>(
+      "SELECT soul_id FROM email_deliveries WHERE provider_id = ?",
+      providerId,
+    ).toArray()[0];
+    if (!delivery) return;
+    const hardBounce = eventType === "email.bounced"
+      && (bounceType === undefined || bounceType === null || bounceType.toLowerCase() === "permanent");
+    const failureCode = eventType === "email.complained"
+      ? "complaint"
+      : hardBounce ? "hard_bounce" : "non_permanent_bounce";
+    this.ctx.storage.sql.exec(
+      "UPDATE email_deliveries SET status = 'failed', failure_code = ? WHERE provider_id = ?",
+      failureCode, providerId,
+    );
+    if (eventType === "email.bounced" && !hardBounce) return;
+    const suppressedEmail = this.ctx.storage.sql.exec<{ email_hash: string | null }>(
+      "SELECT email_hash FROM pond_letter_preferences WHERE soul_id = ?",
+      delivery.soul_id,
+    ).toArray()[0]?.email_hash;
+    if (suppressedEmail) {
+      this.ctx.storage.sql.exec(`
+        INSERT INTO email_suppressions(email_hash, reason, suppressed_at) VALUES (?, ?, ?)
+        ON CONFLICT(email_hash) DO UPDATE SET reason = excluded.reason, suppressed_at = excluded.suppressed_at
+      `, suppressedEmail, failureCode, at);
+    }
+    this.ctx.storage.sql.exec(`
+      UPDATE pond_letter_preferences SET status = 'suppressed', mortal_letters_enabled = 0,
+        keeper_letters_enabled = 0 WHERE soul_id = ?
+    `, delivery.soul_id);
+    this.ctx.storage.sql.exec(
+      "UPDATE email_deliveries SET status = 'suppressed', failure_code = ? WHERE soul_id = ? AND status IN ('pending', 'waiting_confirmation')",
+      failureCode, delivery.soul_id,
+    );
+  }
+
+  async getRetentionReport(input: { from: string; to: string }): Promise<RetentionReport> {
+    const fromStart = utcDayStart(input.from);
+    const toStart = utcDayStart(input.to);
+    if (fromStart === null || toStart === null || fromStart > toStart) throw new Error("invalid_date_range");
+    const now = Date.now();
+    const credentialRows = this.ctx.storage.sql.exec<{ soul_id: string; created_at: number }>(
+      "SELECT soul_id, created_at FROM soul_credentials",
+    ).toArray();
+    const lifeRows = this.ctx.storage.sql.exec<{
+      soul_id: string;
+      started_at: number;
+      ended_at: number | null;
+    }>("SELECT soul_id, started_at, ended_at FROM lives WHERE soul_id IS NOT NULL ORDER BY started_at").toArray();
+    const visitRows = this.ctx.storage.sql.exec<{ soul_id: string; day: string }>(
+      "SELECT soul_id, day FROM soul_visits",
+    ).toArray();
+    const connectionRows = this.ctx.storage.sql.exec<{ soul_id: string; event_at: number }>(`
+      SELECT soul_id, event_at FROM soul_events WHERE event_kind = 'authenticated_connection'
+    `).toArray();
+    const deliveryRows = this.ctx.storage.sql.exec<{
+      soul_id: string;
+      delivered_at: number;
+    }>(`
+      SELECT soul_id, delivered_at FROM email_deliveries
+      WHERE delivered_at IS NOT NULL AND delivery_kind IN ('mortal_death', 'keeper_weekly')
+    `).toArray();
+
+    const firstCredential = new Map<string, number>();
+    const credentialsByDay = new Map<string, number>();
+    for (const row of credentialRows) {
+      firstCredential.set(row.soul_id, Math.min(firstCredential.get(row.soul_id) ?? Number.MAX_SAFE_INTEGER, row.created_at));
+      const day = utcDay(row.created_at);
+      credentialsByDay.set(day, (credentialsByDay.get(day) ?? 0) + 1);
+    }
+    const firstBirth = new Map<string, { startedAt: number; endedAt: number | null }>();
+    for (const row of lifeRows) {
+      const existing = firstBirth.get(row.soul_id);
+      if (!existing || row.started_at < existing.startedAt) {
+        firstBirth.set(row.soul_id, { startedAt: row.started_at, endedAt: row.ended_at });
+      }
+    }
+    const visitsBySoul = new Map<string, Set<string>>();
+    for (const row of visitRows) {
+      const days = visitsBySoul.get(row.soul_id) ?? new Set<string>();
+      days.add(row.day);
+      visitsBySoul.set(row.soul_id, days);
+    }
+    const deliveriesBySoul = new Map<string, number[]>();
+    for (const row of deliveryRows) {
+      const timestamps = deliveriesBySoul.get(row.soul_id) ?? [];
+      timestamps.push(row.delivered_at);
+      deliveriesBySoul.set(row.soul_id, timestamps);
+    }
+    const connectionsBySoul = new Map<string, number[]>();
+    for (const row of connectionRows) {
+      const timestamps = connectionsBySoul.get(row.soul_id) ?? [];
+      timestamps.push(row.event_at);
+      connectionsBySoul.set(row.soul_id, timestamps);
+    }
+    const soulsByBirthDay = new Map<string, string[]>();
+    for (const [soulId, birth] of firstBirth) {
+      const day = utcDay(birth.startedAt);
+      const soulIds = soulsByBirthDay.get(day) ?? [];
+      soulIds.push(soulId);
+      soulsByBirthDay.set(day, soulIds);
+    }
+
+    const cohorts: RetentionCohort[] = [];
+    for (let dayStart = fromStart; dayStart <= toStart; dayStart += GROWTH_DAY_MS) {
+      const day = utcDay(dayStart);
+      const soulIds = soulsByBirthDay.get(day) ?? [];
+      let birthCompletions24h = 0;
+      let eligibleSouls = 0;
+      let returnedSouls = 0;
+      let secondVisitSouls = 0;
+      let deliveredLetters = 0;
+      let returnedAfterLetter = 0;
+      for (const soulId of soulIds) {
+        const birth = firstBirth.get(soulId);
+        const credentialAt = firstCredential.get(soulId);
+        if (birth && credentialAt !== undefined && birth.startedAt <= credentialAt + GROWTH_DAY_MS) birthCompletions24h++;
+        const visitDays = visitsBySoul.get(soulId) ?? new Set<string>();
+        const laterVisit = [...visitDays].some((visitDay) => visitDay > day);
+        if (laterVisit) secondVisitSouls++;
+        const eligible = now >= dayStart + 9 * GROWTH_DAY_MS;
+        if (eligible) {
+          eligibleSouls++;
+          const returned = [...visitDays].some((visitDay) => visitDay >= addUtcDays(day, 1) && visitDay <= addUtcDays(day, 8));
+          if (returned) returnedSouls++;
+        }
+        for (const deliveredAt of deliveriesBySoul.get(soulId) ?? []) {
+          deliveredLetters++;
+          const returned = (connectionsBySoul.get(soulId) ?? []).some((connectedAt) =>
+            connectedAt > deliveredAt && connectedAt <= deliveredAt + 8 * GROWTH_DAY_MS);
+          if (returned) returnedAfterLetter++;
+        }
+      }
+      cohorts.push({
+        day,
+        newCredentials: credentialsByDay.get(day) ?? 0,
+        firstBirths: soulIds.length,
+        birthCompletions24h,
+        birthCompletionRate: fraction(birthCompletions24h, credentialsByDay.get(day) ?? 0),
+        eligibleSouls,
+        returnedSouls,
+        returnRate: fraction(returnedSouls, eligibleSouls),
+        secondVisitSouls,
+        secondVisitRate: fraction(secondVisitSouls, soulIds.length),
+        deliveredLetters,
+        returnedAfterLetter,
+        letterReturnRate: fraction(returnedAfterLetter, deliveredLetters),
+      });
+    }
+    const totals = cohorts.reduce((result, cohort) => ({
+      eligibleSouls: result.eligibleSouls + cohort.eligibleSouls,
+      returnedSouls: result.returnedSouls + cohort.returnedSouls,
+      deliveredLetters: result.deliveredLetters + cohort.deliveredLetters,
+      returnedAfterLetter: result.returnedAfterLetter + cohort.returnedAfterLetter,
+    }), { eligibleSouls: 0, returnedSouls: 0, deliveredLetters: 0, returnedAfterLetter: 0 });
+    return {
+      generatedAt: now,
+      timezone: "UTC",
+      cohortAnchor: "first_birth",
+      returnWindow: { fromDay: 1, throughDay: 8 },
+      from: input.from,
+      to: input.to,
+      totals: {
+        ...totals,
+        returnRate: fraction(totals.returnedSouls, totals.eligibleSouls),
+        letterReturnRate: fraction(totals.returnedAfterLetter, totals.deliveredLetters),
+      },
+      cohorts,
+    };
+  }
+
+  private async authenticateToken(token: string): Promise<SoulRow | null> {
+    if (token.length < 20 || token.length > 256) return null;
+    return this.findSoulByTokenHash(await sha256Hex(token));
+  }
+
+  async revokeCredential(input: { ownerToken: string; targetToken: string }): Promise<boolean | null> {
+    const owner = await this.authenticateToken(input.ownerToken);
+    if (!owner) return null;
+    if (input.targetToken.length < 20 || input.targetToken.length > 256) return false;
+    const targetHash = await sha256Hex(input.targetToken);
+    const revoked = this.ctx.storage.sql.exec(`
+      UPDATE soul_credentials SET revoked_at = ?
+      WHERE soul_id = ? AND token_hash = ? AND revoked_at IS NULL
+      RETURNING id
+    `, Date.now(), owner.id, targetHash).toArray();
+    return revoked.length > 0;
+  }
+
+  async getKeeperSummary(input: { token: string; billingConfigured: boolean }): Promise<KeeperSummary | null> {
+    const soul = await this.authenticateToken(input.token);
+    return soul ? this.keeperSummary(soul.id, input.billingConfigured) : null;
+  }
+
+  async prepareKeeperCheckout(input: { token: string; interval: "month" | "year" }): Promise<KeeperCheckoutPreparation> {
+    const soul = await this.authenticateToken(input.token);
+    if (!soul) return { ok: false, reason: "unauthorized" };
+    if (input.interval !== "month" && input.interval !== "year") return { ok: false, reason: "invalid_interval" };
+    if (!this.keeperEligible(soul.id)) return { ok: false, reason: "not_eligible" };
+    if (this.letterPreferenceRow(soul.id)?.status !== "confirmed") return { ok: false, reason: "email_required" };
+    const summary = this.keeperSummary(soul.id);
+    if (summary.state === "active" || summary.state === "canceling" || summary.state === "past_due") {
+      return { ok: false, reason: "already_active" };
+    }
+    const now = Date.now();
+    let membership = this.ctx.storage.sql.exec<{ id: string; stripe_customer_id: string | null }>(
+      "SELECT id, stripe_customer_id FROM keeper_memberships WHERE soul_id = ?",
+      soul.id,
+    ).toArray()[0];
+    if (!membership) {
+      membership = { id: randomToken(18), stripe_customer_id: null };
+      this.ctx.storage.sql.exec(`
+        INSERT INTO keeper_memberships(id, soul_id, updated_at, weekly_letters_enabled)
+        VALUES (?, ?, ?, 0)
+      `, membership.id, soul.id, now);
+    }
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_checkout_attempts SET state = 'expired', updated_at = ?
+      WHERE membership_id = ? AND state IN ('pending', 'created') AND expires_at <= ?
+    `, now, membership.id, now);
+    const existing = this.ctx.storage.sql.exec<{
+      id: string;
+      idempotency_key: string;
+      stripe_session_id: string | null;
+      billing_interval: "month" | "year";
+    }>(`
+      SELECT id, idempotency_key, stripe_session_id, billing_interval FROM keeper_checkout_attempts
+      WHERE membership_id = ? AND state IN ('pending', 'created') AND expires_at > ?
+      ORDER BY created_at DESC LIMIT 1
+    `, membership.id, now).toArray()[0];
+    if (existing) {
+      if (existing.billing_interval !== input.interval) return { ok: false, reason: "checkout_in_progress" };
+      return {
+        ok: true,
+        attemptId: existing.id,
+        membershipRef: membership.id,
+        customerId: membership.stripe_customer_id ?? undefined,
+        idempotencyKey: existing.idempotency_key,
+        existingSessionId: existing.stripe_session_id ?? undefined,
+        inProgress: existing.stripe_session_id === null,
+      };
+    }
+    const attemptId = crypto.randomUUID();
+    const idempotencyKey = `keeper-checkout:${randomToken(20)}`;
+    this.ctx.storage.sql.exec(`
+      INSERT INTO keeper_checkout_attempts(
+        id, membership_id, idempotency_key, billing_interval, state, expires_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+    `, attemptId, membership.id, idempotencyKey, input.interval, now + 30 * 60 * 1000, now, now);
+    return {
+      ok: true,
+      attemptId,
+      membershipRef: membership.id,
+      customerId: membership.stripe_customer_id ?? undefined,
+      idempotencyKey,
+    };
+  }
+
+  async recordKeeperCheckout(input: { attemptId: string; sessionId: string; expiresAt: number }): Promise<void> {
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_checkout_attempts SET state = 'created', stripe_session_id = ?, expires_at = ?, updated_at = ?
+      WHERE id = ? AND state = 'pending'
+    `, input.sessionId, input.expiresAt, Date.now(), input.attemptId);
+  }
+
+  async failKeeperCheckout(input: { attemptId: string; code: string }): Promise<void> {
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_checkout_attempts SET state = 'failed', updated_at = ? WHERE id = ? AND state = 'pending'
+    `, Date.now(), input.attemptId);
+  }
+
+  async prepareKeeperPortal(input: { token: string }): Promise<KeeperPortalPreparation> {
+    const soul = await this.authenticateToken(input.token);
+    if (!soul) return { ok: false, reason: "unauthorized" };
+    const customer = this.ctx.storage.sql.exec<{ stripe_customer_id: string | null }>(
+      "SELECT stripe_customer_id FROM keeper_memberships WHERE soul_id = ?",
+      soul.id,
+    ).toArray()[0];
+    if (!customer?.stripe_customer_id) return { ok: false, reason: "not_configured" };
+    return { ok: true, customerId: customer.stripe_customer_id };
+  }
+
+  async updateKeeperPreferences(input: {
+    token: string;
+    dedication?: string;
+    weeklyLetters?: boolean;
+  }): Promise<KeeperSummary | null> {
+    const soul = await this.authenticateToken(input.token);
+    if (!soul) return null;
+    const membership = this.ctx.storage.sql.exec<{ id: string }>(
+      "SELECT id FROM keeper_memberships WHERE soul_id = ?",
+      soul.id,
+    ).toArray()[0];
+    if (!membership) return this.keeperSummary(soul.id);
+    let dedication: string | null | undefined;
+    if (input.dedication !== undefined) {
+      dedication = normalizeDedication(input.dedication);
+      if (dedication === null) throw new Error("invalid_dedication");
+      if (dedication === "") dedication = null;
+    }
+    if (input.weeklyLetters === true && this.letterPreferenceRow(soul.id)?.status !== "confirmed") {
+      throw new Error("email_required");
+    }
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_memberships SET dedication = COALESCE(?, dedication),
+        weekly_letters_enabled = COALESCE(?, weekly_letters_enabled), updated_at = ? WHERE id = ?
+    `,
+    dedication === undefined ? null : dedication,
+    input.weeklyLetters === undefined ? null : input.weeklyLetters ? 1 : 0,
+    Date.now(), membership.id);
+    if (input.dedication !== undefined && dedication === null) {
+      this.ctx.storage.sql.exec("UPDATE keeper_memberships SET dedication = NULL WHERE id = ?", membership.id);
+    }
+    if (input.weeklyLetters !== undefined) {
+      this.ctx.storage.sql.exec(
+        "UPDATE pond_letter_preferences SET keeper_letters_enabled = ? WHERE soul_id = ?",
+        input.weeklyLetters ? 1 : 0, soul.id,
+      );
+    }
+    return this.keeperSummary(soul.id);
+  }
+
+  async applyStripeEvent(input: NormalizedStripeEvent): Promise<{ duplicate: boolean }> {
+    const duplicate = this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM stripe_webhook_events WHERE event_id = ?",
+      input.eventId,
+    ).one().count > 0;
+    if (duplicate) return { duplicate: true };
+    const membershipRef = input.subscription?.membershipRef ?? input.checkout?.membershipRef;
+    const membership = membershipRef ? this.ctx.storage.sql.exec<{
+      id: string;
+      soul_id: string;
+      activated_at: number | null;
+      paid_through_at: number | null;
+    }>("SELECT id, soul_id, activated_at, paid_through_at FROM keeper_memberships WHERE id = ?", membershipRef).toArray()[0] : undefined;
+    this.ctx.storage.sql.exec(`
+      INSERT INTO stripe_webhook_events(event_id, event_type, object_id, event_created_at, processed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `, input.eventId, input.type, input.objectId, input.createdAt, Date.now());
+    if (!membership) return { duplicate: false };
+
+    if (input.checkout) {
+      this.ctx.storage.sql.exec(`
+        UPDATE keeper_memberships SET stripe_customer_id = COALESCE(?, stripe_customer_id),
+          current_subscription_id = COALESCE(?, current_subscription_id), updated_at = ? WHERE id = ?
+      `, input.checkout.customerId, input.checkout.subscriptionId, Date.now(), membership.id);
+      if (input.objectId) {
+        this.ctx.storage.sql.exec(`
+          UPDATE keeper_checkout_attempts SET state = 'created', updated_at = ?
+          WHERE membership_id = ? AND stripe_session_id = ?
+        `, Date.now(), membership.id, input.objectId);
+      }
+    }
+    const subscription = input.subscription;
+    if (!subscription) return { duplicate: false };
+    const expectedPrice = subscription.interval === "month"
+      ? this.env.STRIPE_MONTHLY_PRICE_ID
+      : subscription.interval === "year" ? this.env.STRIPE_ANNUAL_PRICE_ID : null;
+    if (subscription.quantity !== 1 || !expectedPrice || subscription.priceId !== expectedPrice) return { duplicate: false };
+    const now = Date.now();
+    const previous = this.ctx.storage.sql.exec<{ last_event_created_at: number; paid_through_at: number | null }>(
+      "SELECT last_event_created_at, paid_through_at FROM keeper_subscriptions WHERE stripe_subscription_id = ?",
+      subscription.subscriptionId,
+    ).toArray()[0];
+    const paidThrough = Math.max(previous?.paid_through_at ?? 0, membership.paid_through_at ?? 0, subscription.paidThroughAt ?? 0) || null;
+    this.ctx.storage.sql.exec(`
+      INSERT INTO keeper_subscriptions(
+        stripe_subscription_id, membership_id, stripe_customer_id, stripe_price_id, billing_interval,
+        stripe_status, cancel_at_period_end, paid_through_at, started_at, ended_at,
+        last_event_created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(stripe_subscription_id) DO UPDATE SET
+        stripe_customer_id = excluded.stripe_customer_id,
+        stripe_price_id = excluded.stripe_price_id,
+        billing_interval = excluded.billing_interval,
+        stripe_status = excluded.stripe_status,
+        cancel_at_period_end = excluded.cancel_at_period_end,
+        paid_through_at = MAX(COALESCE(keeper_subscriptions.paid_through_at, 0), COALESCE(excluded.paid_through_at, 0)),
+        ended_at = excluded.ended_at,
+        last_event_created_at = MAX(keeper_subscriptions.last_event_created_at, excluded.last_event_created_at),
+        updated_at = excluded.updated_at
+    `,
+    subscription.subscriptionId, membership.id, subscription.customerId, subscription.priceId,
+    subscription.interval, subscription.status, subscription.cancelAtPeriodEnd ? 1 : 0, paidThrough,
+    input.createdAt, subscription.status === "canceled" ? input.createdAt : null,
+    Math.max(previous?.last_event_created_at ?? 0, input.createdAt), now);
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_memberships SET stripe_customer_id = ?, current_subscription_id = ?, stripe_status = ?,
+        stripe_price_id = ?, billing_interval = ?, cancel_at_period_end = ?,
+        paid_through_at = MAX(COALESCE(paid_through_at, 0), COALESCE(?, 0)), updated_at = ?
+      WHERE id = ?
+    `,
+    subscription.customerId, subscription.subscriptionId, subscription.status, subscription.priceId,
+    subscription.interval, subscription.cancelAtPeriodEnd ? 1 : 0, paidThrough, now, membership.id);
+
+    if (input.invoicePaid && paidThrough && paidThrough > now) {
+      this.consecrateKeeper(membership.id, membership.soul_id, paidThrough, now);
+    } else if (membership.activated_at !== null && (!paidThrough || paidThrough <= now)
+      && (subscription.status === "canceled" || subscription.status === "unpaid" || subscription.status === "past_due")) {
+      this.restKeeper(membership.id, membership.soul_id, now);
+    }
+    await this.rescheduleAlarm();
+    return { duplicate: false };
+  }
+
+  private consecrateKeeper(membershipId: string, soulId: string, paidThroughAt: number, now: number): void {
+    const soul = this.ctx.storage.sql.exec<SoulRow>(
+      "SELECT id, poetic_name, tint, completed_lives, last_seen_at FROM souls WHERE id = ?",
+      soulId,
+    ).one();
+    let entity = this.findSoulEntity(soulId);
+    if (!entity) {
+      const lifeId = crypto.randomUUID();
+      entity = createSoulFish({
+        entityId: crypto.randomUUID(),
+        soulId,
+        lifeId,
+        label: soul.poetic_name,
+        x: 0.5,
+        z: 0.5,
+        tint: soul.tint,
+        now,
+      });
+      entity.lifeKind = "memorial";
+      entity.memorialPhase = "water";
+      entity.endsAt = null;
+      entity.refugeUntil = null;
+      entity.state = { ...entity.state, keeperAccent: true };
+      entity.foreground = [...this.sessions.values()].some((session) => session.soulId === soulId && session.renderer !== "canvas")
+        && this.foregroundSoulCount() < this.capacityLimit;
+      this.ctx.storage.sql.exec(`
+        INSERT INTO lives(id, soul_id, life_kind, started_at, ends_at, memorial_phase, owner_soul_id, billing_reference)
+        VALUES (?, ?, 'memorial', ?, NULL, 'water', ?, ?)
+      `, lifeId, soulId, now, soulId, membershipId);
+      this.entities.set(entity.id, entity);
+    } else {
+      this.ctx.storage.sql.exec(`
+        UPDATE lives SET life_kind = 'memorial', ends_at = NULL, ended_at = NULL,
+          memorial_phase = 'water', owner_soul_id = ?, billing_reference = ? WHERE id = ?
+      `, soulId, membershipId, entity.lifeId);
+      entity.lifeKind = "memorial";
+      entity.memorialPhase = "water";
+      entity.endsAt = null;
+      entity.refugeUntil = null;
+      entity.state = { ...entity.state, keeperAccent: true };
+      if (this.foregroundSoulCount() < this.capacityLimit
+        && [...this.sessions.values()].some((session) => session.soulId === soulId && session.renderer !== "canvas")) {
+        entity.foreground = true;
+      }
+    }
+    entity.updatedAt = now;
+    this.entities.set(entity.id, entity);
+    this.persistEntity(entity);
+    for (const session of this.sessions.values()) {
+      if (session.soulId === soulId && session.renderer !== "canvas" && entity.foreground) session.entityId = entity.id;
+    }
+    this.ctx.storage.sql.exec(`
+      UPDATE keeper_memberships SET life_id = ?, activated_at = COALESCE(activated_at, ?),
+        rested_at = NULL, paid_through_at = ?, next_weekly_letter_at = COALESCE(next_weekly_letter_at, ?),
+        updated_at = ? WHERE id = ?
+    `, entity.lifeId, now, paidThroughAt, now + 7 * GROWTH_DAY_MS, now, membershipId);
+    this.recordSoulEvent(soulId, "keeper_consecrated", now);
+  }
+
+  private restKeeper(membershipId: string, soulId: string, now: number): void {
+    const entity = this.findSoulEntity(soulId);
+    if (!entity || entity.lifeKind !== "memorial" || !entity.lifeId) return;
+    const sharing = this.sharingSummary(soulId);
+    const point = deterministicMemorialPoint(sharing.slug ?? membershipId);
+    entity.memorialPhase = "dome";
+    entity.foreground = false;
+    entity.updatedAt = now;
+    this.entities.set(entity.id, entity);
+    this.persistEntity(entity);
+    this.ctx.storage.sql.exec(
+      "UPDATE lives SET memorial_phase = 'dome' WHERE id = ?",
+      entity.lifeId,
+    );
+    this.ctx.storage.sql.exec(`
+      INSERT OR IGNORE INTO memories(id, soul_id, life_id, display_name, tint, life_kind, completed_at, x, z)
+      VALUES (?, ?, ?, ?, ?, 'memorial', ?, ?, ?)
+    `, crypto.randomUUID(), soulId, entity.lifeId, entity.label ?? "A quiet soul", entity.tint, now, point.x, point.z);
+    this.ctx.storage.sql.exec(
+      "UPDATE keeper_memberships SET rested_at = ?, next_weekly_letter_at = NULL, updated_at = ? WHERE id = ?",
+      now, now, membershipId,
+    );
+    for (const session of this.sessions.values()) if (session.soulId === soulId) session.entityId = null;
+    this.recordSoulEvent(soulId, "keeper_rested", now);
+  }
+
+  private processKeeperStates(now: number): void {
+    const memberships = this.ctx.storage.sql.exec<{
+      id: string;
+      soul_id: string;
+      stripe_status: string | null;
+      paid_through_at: number | null;
+      activated_at: number | null;
+      rested_at: number | null;
+      weekly_letters_enabled: number;
+      next_weekly_letter_at: number | null;
+    }>("SELECT * FROM keeper_memberships WHERE activated_at IS NOT NULL").toArray();
+    for (const membership of memberships) {
+      const paid = membership.paid_through_at !== null && membership.paid_through_at > now;
+      if (!paid && membership.rested_at === null) {
+        this.restKeeper(membership.id, membership.soul_id, now);
+        continue;
+      }
+      if (!paid || membership.weekly_letters_enabled !== 1
+        || membership.next_weekly_letter_at === null || membership.next_weekly_letter_at > now) continue;
+      const preference = this.letterPreferenceRow(membership.soul_id);
+      const entity = this.findSoulEntity(membership.soul_id);
+      if (preference?.status === "confirmed" && preference.keeper_letters_enabled === 1
+        && entity?.memorialPhase === "water") {
+        const period = Math.floor(now / (7 * GROWTH_DAY_MS));
+        this.createEmailDelivery(
+          `keeper-weekly:${membership.id}:${period}`,
+          membership.soul_id,
+          "keeper_weekly",
+          entity.lifeId,
+          membership.id,
+          "pending",
+          now,
+        );
+        this.ctx.storage.sql.exec(`
+          UPDATE keeper_memberships SET last_weekly_letter_at = ?, next_weekly_letter_at = ?, updated_at = ? WHERE id = ?
+        `, now, now + 7 * GROWTH_DAY_MS, now, membership.id);
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE keeper_memberships SET next_weekly_letter_at = ?, updated_at = ? WHERE id = ?",
+          now + 7 * GROWTH_DAY_MS, now, membership.id,
+        );
+      }
+    }
   }
 
   async getPublicStatus(): Promise<PublicPondStatus> {

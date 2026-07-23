@@ -7,6 +7,17 @@
   const reducedMotionKey = 'eternalpond.reduced-motion.v2';
   const mutedKey = 'pond_muted';
 
+  function publicSlugFromPath() {
+    const match = location.pathname.match(/^\/s\/([^/]+)\/?$/);
+    if (!match) return null;
+    try {
+      const slug = decodeURIComponent(match[1]).toLowerCase();
+      return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) && slug.length <= 96 ? slug : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   function shortestAngle(from, to) {
     return ((to - from + Math.PI * 3) % TAU) - Math.PI;
   }
@@ -362,6 +373,7 @@
       this.color = new THREE.Color();
       this.white = new THREE.Color(0xf2eee1);
       this.faded = new THREE.Color(0xcbd4cb);
+      this.keeperPearl = new THREE.Color(0xe8e3d2);
       this.raycaster = new THREE.Raycaster();
       this.pointer = new THREE.Vector2();
       this.indexToId = [];
@@ -467,7 +479,8 @@
       this.scale.set(baseSize * 0.38, baseSize * 0.5, baseSize * 0.16);
       this.matrix.compose(this.position, this.quaternion, this.scale);
       this.fins.setMatrixAt(index, this.matrix);
-      this.fins.setColorAt(index, this.color);
+      const keeperAccent = state.state && state.state.keeperAccent === true;
+      this.fins.setColorAt(index, keeperAccent ? this.keeperPearl : this.color);
 
       const pairedIndex = index * 2;
       const finFlap = reducedMotion ? 0 : Math.sin(elapsed * 4.4 + phase * 2.2) * 0.08;
@@ -484,7 +497,7 @@
         this.scale.set(baseSize * 0.48, baseSize * 0.3, baseSize * 0.66);
         this.matrix.compose(this.position, this.quaternion, this.scale);
         this.sideFins.setMatrixAt(instanceIndex, this.matrix);
-        this.sideFins.setColorAt(instanceIndex, this.color);
+        this.sideFins.setColorAt(instanceIndex, keeperAccent ? this.keeperPearl : this.color);
 
         this.position.copy(this.center);
         this.position.x += (forwardX * 1.01 + lateralX * side * 0.36) * baseSize;
@@ -765,12 +778,8 @@
           shadow,
           mixer: glb ? glb.mixer : null,
           phase: seed * 0.001,
-          idleRole: ordinal % 3,
-          perchAngle: (seed % 6283) / 1000,
           perchIndex: ordinal,
-          flightSpeed: 0.13 + (seed % 1000) / 1000 * 0.045,
-          flightRadius: R_WATER * (0.48 + ((seed >>> 8) % 1000) / 1000 * 0.22),
-          flightSquash: 0.72 + ((seed >>> 16) % 1000) / 1000 * 0.2,
+          perchPoint: new THREE.Vector3(),
         };
       } else if (state.kind === 'frog') {
         const model = buildFrog();
@@ -1069,24 +1078,70 @@
       const mode = runtime.mode || 'circling';
       let x = toWorldX(view.currentX * W);
       let z = toWorldZ(view.currentZ * H);
-      const radius = Math.hypot(x, z);
-      let groundHeight = terrainHeight(radius) + 0.08;
-      let height = mode === 'circling' ? 18 : mode === 'perched' ? groundHeight + 10.5 : groundHeight + 1.2;
+      const flightHeight = 17.5 + (bird.perchIndex % 3) * 1.25;
+      let groundHeight = terrainHeight(Math.hypot(x, z)) + 0.08;
+      let height = flightHeight;
       let heading = view.currentHeading;
       let pitch = 0;
       let bank = 0;
-      let flap = mode === 'circling' ? Math.sin(worldSeconds * 8.5 + bird.phase) * 0.72 : 0.82;
+      let flap = reducedMotion ? 0.08 : Math.sin(worldSeconds * 8.5 + bird.phase) * 0.72;
       const transitionStart = runtime.transitionStartedAt || 0;
       const transitionEnd = runtime.transitionEndsAt || 0;
-      if (transitionEnd > now && transitionEnd > transitionStart) {
-        const progress = THREE.MathUtils.clamp((now - transitionStart) / (transitionEnd - transitionStart), 0, 1);
-        height += Math.sin(progress * Math.PI) * 8;
-        flap = Math.sin(worldSeconds * 10 + bird.phase) * 0.78;
+      const rawProgress = transitionEnd > transitionStart
+        ? THREE.MathUtils.clamp((now - transitionStart) / (transitionEnd - transitionStart), 0, 1)
+        : 0;
+      const progress = rawProgress * rawProgress * (3 - 2 * rawProgress);
+      const restMode = runtime.birdRestMode || (mode === 'perched' ? 'perched' : 'foraging');
+      const perch = restMode === 'perched' && typeof copyBirdPerchAnchor === 'function'
+        ? copyBirdPerchAnchor(runtime.targetAnchor || 0, bird.perchPoint)
+        : null;
+      const transitionFrom = runtime.transitionFrom || { x: view.currentX, z: view.currentZ };
+      const transitionTo = runtime.transitionTo || { x: view.currentX, z: view.currentZ };
+      const fromX = toWorldX(transitionFrom.x * W);
+      const fromZ = toWorldZ(transitionFrom.z * H);
+      const toX = toWorldX(transitionTo.x * W);
+      const toZ = toWorldZ(transitionTo.z * H);
+
+      if (mode === 'approaching') {
+        const landingX = perch ? perch.x : toX;
+        const landingZ = perch ? perch.z : toZ;
+        x = THREE.MathUtils.lerp(fromX, landingX, progress);
+        z = THREE.MathUtils.lerp(fromZ, landingZ, progress);
+        groundHeight = terrainHeight(Math.hypot(x, z)) + 0.08;
+        const landingHeight = perch ? perch.y + 0.55 : groundHeight + 1.2;
+        height = THREE.MathUtils.lerp(flightHeight, landingHeight, progress);
+        heading = Math.atan2(landingZ - fromZ, landingX - fromX);
+        pitch = reducedMotion ? 0 : -0.18 * (1 - progress);
+      } else if (mode === 'takingOff') {
+        const takeoffFromPerch = runtime.birdTakeoffFrom === 'perched' && perch;
+        const launchX = takeoffFromPerch ? perch.x : fromX;
+        const launchZ = takeoffFromPerch ? perch.z : fromZ;
+        const launchGround = terrainHeight(Math.hypot(launchX, launchZ)) + 0.08;
+        const launchHeight = takeoffFromPerch ? perch.y + 0.55 : runtime.birdTakeoffFrom === 'air' ? flightHeight * 0.55 : launchGround + 1.2;
+        x = THREE.MathUtils.lerp(launchX, toX, progress);
+        z = THREE.MathUtils.lerp(launchZ, toZ, progress);
+        groundHeight = terrainHeight(Math.hypot(x, z)) + 0.08;
+        height = THREE.MathUtils.lerp(launchHeight, flightHeight, progress);
+        heading = Math.atan2(toZ - launchZ, toX - launchX);
+        pitch = reducedMotion ? 0 : 0.22 * (1 - progress);
+      } else if (mode === 'perched') {
+        if (perch) {
+          x = perch.x;
+          z = perch.z;
+          groundHeight = terrainHeight(Math.hypot(x, z)) + 0.08;
+          height = perch.y + 0.55;
+        } else {
+          height = groundHeight + 1.2;
+        }
+        flap = 0.08;
+      } else if (mode === 'foraging') {
+        height = groundHeight + 1.2;
+        flap = 0.08;
+        pitch = reducedMotion ? 0.08 : Math.max(0, Math.sin(worldSeconds * 2.2 + bird.phase)) * 0.34;
       }
-      if (mode === 'foraging') {
-        pitch = Math.max(0, Math.sin(worldSeconds * 2.2 + bird.phase)) * 0.34;
-      } else if (mode === 'circling') {
-        bank = Math.sin(worldSeconds * 1.2 + bird.phase) * 0.23;
+
+      if (mode === 'circling') {
+        bank = reducedMotion ? 0 : Math.sin(worldSeconds * 1.2 + bird.phase) * 0.23;
       }
 
       const hunt = this.activeNature('bird_hunt', view.state.id);
@@ -1120,7 +1175,7 @@
       bird.mesh.position.set(x, height, z);
       bird.mesh.rotation.set(pitch, -heading, bank);
       bird.mesh.scale.setScalar(birdScale);
-      if (bird.mixer) bird.mixer.update(deltaSeconds);
+      if (bird.mixer) bird.mixer.update(reducedMotion ? 0 : deltaSeconds);
       else if (bird.model.userData.wings) {
         for (const wing of bird.model.userData.wings) {
           wing.pivot.rotation.x = flap * wing.side;
@@ -1346,6 +1401,37 @@
       if (this.onModeChange) this.onModeChange('free');
     }
 
+    focusPublicSoul(soul) {
+      if (!soul) return;
+      this.mode = 'free';
+      controls.enabled = true;
+      controls.autoRotate = false;
+      const presentation = soul.currentLife && soul.currentLife.presentation;
+      if (soul.status === 'alive' && presentation) {
+        normalizedToWorld(presentation.x, presentation.z, presentation.depth || 0, this.freeTarget);
+        this.freeTarget.y += 1.2;
+        this.freePosition.set(this.freeTarget.x + 18, this.freeTarget.y + 10, this.freeTarget.z + 18);
+      } else {
+        const domeBearing = (hashString(soul.slug || 'remembered-soul') / 0xffffffff) * TAU;
+        this.freeTarget.set(0, 3, 0);
+        this.freePosition.set(Math.cos(domeBearing) * 31, 14, Math.sin(domeBearing) * 31);
+      }
+      camera.position.copy(this.freePosition);
+      controls.target.copy(this.freeTarget);
+      this.lookTarget.copy(this.freeTarget);
+      lastInteract = performance.now();
+      controls.update();
+      if (this.onModeChange) this.onModeChange('free');
+    }
+
+    focusMemory(memory) {
+      if (!memory || !Number.isFinite(memory.x) || !Number.isFinite(memory.z)) return;
+      this.focusPublicSoul({
+        status: 'alive',
+        currentLife: { presentation: { x: memory.x, z: memory.z, depth: 0 } },
+      });
+    }
+
     toggle() {
       if (this.mode === 'ride') this.enterFree();
       else this.enterRide();
@@ -1416,12 +1502,16 @@
   let returningEntityId = null;
   let resumedReturningFish = false;
   let queued = false;
+  let incarnationBlocked = false;
   let frameCountV2 = 0;
   let previousFrame = performance.now();
   let elapsedV2 = 0;
   let lastLabelUpdate = 0;
   let lastAudioUpdate = 0;
   let loopErrors = 0;
+  const publicSlug = publicSlugFromPath();
+  let publicMemorialTracked = false;
+  let memorialReturnPending = false;
 
   function serverOrbitPhase() {
     const elapsed = ((client.serverNow() - orbitEpoch) % orbitPeriod + orbitPeriod) % orbitPeriod;
@@ -1541,7 +1631,7 @@
     ui.setSnapshot(snapshot);
     ui.setQueue(null);
     queued = false;
-    ui.showBirthCue(!client.ownedEntityId);
+    ui.showBirthCue(!client.ownedEntityId && !incarnationBlocked);
     ui.setCameraAvailable(!!client.ownedEntityId && entities.tracked.has(client.ownedEntityId));
     if (client.ownedEntityId) ui.awaken();
     if (returningEntityId && client.ownedEntityId === returningEntityId && !resumedReturningFish) {
@@ -1553,10 +1643,20 @@
   client.on('state', (state) => ui.setConnection(state));
   client.on('message', (message) => {
     if (message.type === 'welcome') {
-      ui.setIdentity(message.identity);
+      ui.setWelcome(message);
+      ui.setCredentials(client.credentialSummaries());
+      incarnationBlocked = !!(message.currentLife && message.currentLife.status === 'resting');
       returningEntityId = message.ownedEntityId;
       entities.setOwnedEntity(message.ownedEntityId);
-      if (message.recentLifeRecord) ui.showLifeEnded(message.recentLifeRecord.ageText, false);
+      if (message.recentLifeRecord) {
+        ui.showLifeEnded(message.recentLifeRecord.ageText, false, message.recentLifeRecord.completedAt);
+        if (memorialReturnPending && !publicMemorialTracked && window.PondAnalytics) {
+          publicMemorialTracked = true;
+          window.PondAnalytics.track('memorial_open');
+        }
+      }
+      memorialReturnPending = false;
+      if (publicSlug) client.observePublicSoul(publicSlug);
     } else if (message.type === 'snapshot') {
       handleSnapshot(message.snapshot);
     } else if (message.type === 'delta') {
@@ -1567,21 +1667,80 @@
     } else if (message.type === 'queue') {
       queued = true;
       ui.setQueue(message);
+    } else if (message.type === 'lifeStarted') {
+      client.ownedEntityId = message.life.entityId;
+      incarnationBlocked = false;
+      entities.setOwnedEntity(message.life.entityId);
+      ui.setQueue(null);
+      ui.showBirthCue(false);
+      ui.showLifeStarted(message.life);
+      if (window.PondAnalytics) {
+        window.PondAnalytics.track('fish_birth');
+        if (message.reincarnation) window.PondAnalytics.track('reincarnation');
+      }
     } else if (message.type === 'lifeEnded') {
+      incarnationBlocked = false;
       if (!client.ownedEntityId || message.entityId === entities.ownedEntityId) {
         entities.setOwnedEntity(null);
         ui.setCameraAvailable(false);
         stableCamera.beginDeath();
-        ui.showLifeEnded(message.ageText);
+        ui.showLifeEnded(message.ageText, true, message.completedAt, message.memory);
       }
+    } else if (message.type === 'sharingAck') {
+      ui.setSharingBusy(false);
+      if (message.accepted) ui.setSharing(message.sharing);
+      else ui.showNotice('this soul\'s public page could not be changed');
+    } else if (message.type === 'publicSoulContext') {
+      ui.setPublicSoul(message.soul);
+      if (!message.soul) {
+        ui.showNotice('this shared soul is resting beyond view');
+      } else {
+        stableCamera.focusPublicSoul(message.soul);
+        if (message.soul.status !== 'alive' && !publicMemorialTracked && window.PondAnalytics) {
+          publicMemorialTracked = true;
+          window.PondAnalytics.track('memorial_open');
+        }
+      }
+    } else if (message.type === 'pondLetterAck') {
+      ui.setLetterBusy(false);
+      if (message.accepted) {
+        ui.setLetterPreference(message.preference, { trackConfirmation: true });
+        if (message.confirmationSent) ui.showNotice('a confirmation is on its way');
+      } else {
+        const letterFailure = message.reason === 'invalid_email'
+          ? 'that address does not look complete'
+          : message.reason === 'rate_limited'
+            ? 'the pond needs a little time before sending again'
+            : message.reason === 'not_configured'
+              ? 'Pond Letters are not configured yet'
+              : 'nothing changed';
+        ui.showNotice(letterFailure);
+      }
+    } else if (message.type === 'keeperUpdated') {
+      ui.setKeeperBusy(false);
+      ui.setKeeper(message.keeper);
     } else if (message.type === 'ritualAck' && !message.accepted) {
+      if (message.requestId && message.requestId.startsWith('public_ripple_')) ui.setPublicRippleBusy(false);
       if (message.reason === 'cooldown' && message.nextOfferingAt) {
         const minutes = Math.max(1, Math.ceil((message.nextOfferingAt - client.serverNow()) / 60000));
         ui.showNotice(`the pond can receive another offering in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`);
       } else if (message.reason === 'spectator') {
         ui.showNotice('this view can witness the pond, but cannot enter it');
+      } else if (message.reason === 'keeper_resting') {
+        incarnationBlocked = true;
+        ui.showBirthCue(false);
+        ui.showNotice('this eternal fish is resting beneath the dome');
+      }
+    } else if (message.type === 'ritualAck' && message.accepted) {
+      if (message.requestId && message.requestId.startsWith('public_ripple_')) {
+        ui.setPublicRippleBusy(false);
+        ui.showNotice('a ripple moves beside this soul');
       }
     } else if (message.type === 'error') {
+      ui.setSharingBusy(false);
+      ui.setLetterBusy(false);
+      ui.setKeeperBusy(false);
+      ui.setPublicRippleBusy(false);
       ui.showNotice(message.message || 'the shared water shifted out of reach');
     }
   });
@@ -1601,6 +1760,145 @@
   ui.onCameraToggle = () => {
     if (entities.ownedEntityId && entities.tracked.has(entities.ownedEntityId)) stableCamera.toggle();
   };
+  ui.onSetSharing = (enabled) => {
+    ui.setSharingBusy(true);
+    client.setSharing(enabled);
+  };
+  ui.onShare = async (details) => {
+    const share = window.PondShareCard || window.PondShare;
+    if (!share || typeof share.share !== 'function') {
+      ui.showNotice('this browser could not prepare a share');
+      return;
+    }
+    const result = await share.share(details);
+    if (result.method === 'copy') ui.showNotice('the quiet link was copied');
+    else if (result.method === 'unavailable') ui.showNotice('this browser could not share the page');
+  };
+  ui.onSetPondLetter = (preference) => {
+    ui.setLetterBusy(true);
+    client.setPondLetter(preference);
+  };
+  ui.onResendPondLetter = () => {
+    ui.setLetterBusy(true);
+    client.resendPondLetterConfirmation();
+  };
+  ui.onUnsubscribePondLetters = () => {
+    ui.setLetterBusy(true);
+    client.unsubscribePondLetters();
+  };
+  ui.onPublicRipple = (slug) => {
+    ui.setPublicRippleBusy(true);
+    client.leavePublicRipple(slug);
+  };
+  ui.onMemoryFocus = (memory) => {
+    stableCamera.focusMemory(memory);
+    ui.closeLedger();
+    ui.showNotice(`${memory.name} is held here`);
+  };
+  ui.onSwitchCredential = (credentialId) => {
+    if (!client.switchCredential(credentialId)) return;
+    ui.closeLedger();
+    ui.showNotice('returning by another remembered path');
+  };
+  ui.onForgetCredential = async (credentialId) => {
+    ui.setCredentialBusy(true);
+    try {
+      const result = await client.revokeCredential(credentialId);
+      ui.setCredentials(client.credentialSummaries());
+      if (result.wasActive) ui.closeLedger();
+      ui.showNotice(result.wasActive
+        ? result.switchedToSavedCredential
+          ? 'that key is forgotten; another remembered path is opening'
+          : 'that key is forgotten; a new soul is beginning in this browser'
+        : 'that saved browser key is forgotten');
+    } catch (error) {
+      ui.showNotice('that browser key could not be forgotten');
+    } finally {
+      ui.setCredentialBusy(false);
+    }
+  };
+  ui.onKeeperCheckout = async (interval) => {
+    ui.setKeeperBusy(true);
+    try {
+      const result = await client.createKeeperCheckout(interval);
+      const destination = new URL(result.url);
+      if (destination.protocol !== 'https:') throw new Error('invalid_checkout_destination');
+      location.assign(destination.href);
+    } catch (error) {
+      ui.setKeeperBusy(false);
+      ui.showNotice(error && error.message === 'email_required'
+        ? 'confirm a recovery address before keeping a fish'
+        : 'the keeper path could not open');
+    }
+  };
+  ui.onKeeperPortal = async () => {
+    ui.setKeeperBusy(true);
+    try {
+      const result = await client.createKeeperPortal();
+      const destination = new URL(result.url);
+      if (destination.protocol !== 'https:') throw new Error('invalid_portal_destination');
+      location.assign(destination.href);
+    } catch (error) {
+      ui.setKeeperBusy(false);
+      ui.showNotice('the keeper account could not open');
+    }
+  };
+  ui.onKeeperUpdate = async (patch) => {
+    ui.setKeeperBusy(true);
+    try {
+      const result = await client.updateKeeper(patch);
+      const keeper = result && (result.keeper || result);
+      if (keeper && typeof keeper.configured === 'boolean') ui.setKeeper(keeper);
+      ui.showNotice('the pond is holding that change');
+    } catch (error) {
+      ui.showNotice('that keeper change could not be held');
+    } finally {
+      ui.setKeeperBusy(false);
+    }
+  };
+
+  async function inspectSecureLink() {
+    if (!client.pendingLinkClaim) return;
+    try {
+      const inspection = await client.inspectPendingLink();
+      if (!inspection.valid) {
+        ui.showNotice('this private pond path has faded');
+        return;
+      }
+      ui.showSecureLink(inspection, !!client.currentToken());
+    } catch (error) {
+      ui.showNotice('the private pond path could not be read');
+    }
+  }
+
+  ui.onSecureLinkAccept = async () => {
+    ui.setSecureLinkBusy(true);
+    try {
+      const result = await client.redeemPendingLink({ allowSoulSwitch: ui.allowsSecureLinkSwitch() });
+      if (!result.ok && result.message === 'switch_required') {
+        ui.requireSecureLinkSwitch(result);
+        return;
+      }
+      if (!result.ok) throw new Error(result.message || 'link_redeem_failed');
+      memorialReturnPending = result.purpose === 'return_soul';
+      if (result.purpose === 'confirm_email' && window.PondAnalytics) {
+        window.PondAnalytics.track('email_opt_in');
+      }
+      if (result.token) client.adoptCredential(result.token, { name: result.name || '' });
+      else if (result.purpose === 'confirm_email' || result.purpose === 'unsubscribe') client.refreshIdentity();
+      if (result.slug) client.observePublicSoul(result.slug);
+      ui.hideSecureLink();
+      ui.showNotice(result.message || (result.purpose === 'unsubscribe'
+        ? 'the pond will no longer write'
+        : result.purpose === 'confirm_email'
+          ? 'the pond can now remember this address'
+          : `returning to ${result.name || 'this remembered soul'}`));
+    } catch (error) {
+      ui.showNotice('this private pond path could not be followed');
+    } finally {
+      ui.setSecureLinkBusy(false);
+    }
+  };
 
   function awakenExperience() {
     ui.awaken();
@@ -1619,7 +1917,7 @@
   };
 
   function overlayTarget(target) {
-    return target instanceof Element && !!target.closest('button, aside, input, .offering-menu');
+    return target instanceof Element && !!target.closest('button, aside, input, textarea, select, [contenteditable="true"], .pond-card, .offering-menu');
   }
 
   canvas.addEventListener('webglcontextlost', (event) => {
@@ -1690,7 +1988,9 @@
   canvas.addEventListener('pointerup', finishGesture);
   canvas.addEventListener('pointercancel', finishGesture);
   addEventListener('keydown', (event) => {
-    if (event.repeat || event.key.toLowerCase() !== 'c' || event.target instanceof HTMLInputElement) return;
+    const editing = event.target instanceof Element
+      && !!event.target.closest('input, textarea, select, [contenteditable="true"]');
+    if (event.repeat || event.key.toLowerCase() !== 'c' || editing) return;
     awakenExperience();
     if (entities.ownedEntityId) stableCamera.toggle();
   });
@@ -1853,9 +2153,19 @@
     installLegendaryBenchmarkV2();
     controls.autoRotate = !reducedMotion;
     client.connect();
+    inspectSecureLink();
     animateV2();
     setInterval(() => ui.updateLedgerClock(client.serverNow()), 60000);
     setTimeout(hideLoadingScreen, 450);
+
+    const keeperReturn = new URLSearchParams(location.search).get('keeper');
+    if (keeperReturn === 'return') ui.showNotice('the pond is waiting for the paid invoice');
+    else if (keeperReturn === 'cancel') ui.showNotice('nothing changed; the fish remains as it was');
+    if (keeperReturn) {
+      const cleaned = new URL(location.href);
+      cleaned.searchParams.delete('keeper');
+      history.replaceState(history.state, '', cleaned.pathname + cleaned.search + cleaned.hash);
+    }
 
     if (new URLSearchParams(location.search).get('benchmark') === 'legendary' && window.__pondDebug) {
       setTimeout(async () => {

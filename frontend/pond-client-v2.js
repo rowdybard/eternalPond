@@ -3,6 +3,9 @@
 
   const PROTOCOL_VERSION = 3;
   const TOKEN_KEY = 'eternalpond.soul.v2';
+  const CREDENTIAL_VAULT_KEY = 'eternalpond.soul.credentials.v1';
+  const MAX_SAVED_CREDENTIALS = 5;
+  const PRODUCTION_API_ORIGIN = 'https://shared-pond.maxpug17.workers.dev';
 
   function requestId(prefix) {
     const id = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`)
@@ -11,9 +14,13 @@
   }
 
   function socketUrl() {
-    const override = new URLSearchParams(location.search).get('pondWs');
+    const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const bootstrapOverride = window.PondBootstrap && typeof window.PondBootstrap.devWebSocketOverride === 'function'
+      ? window.PondBootstrap.devWebSocketOverride()
+      : null;
+    const override = isLocalhost ? bootstrapOverride || new URLSearchParams(location.search).get('pondWs') : null;
     if (override) return override;
-    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+    if (isLocalhost) {
       return 'ws://127.0.0.1:8787/ws/v3';
     }
     return 'wss://shared-pond.maxpug17.workers.dev/ws/v3';
@@ -24,9 +31,87 @@
     catch (error) { return undefined; }
   }
 
-  function writeToken(token) {
-    try { localStorage.setItem(TOKEN_KEY, token); }
+  function readCredentialVault() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CREDENTIAL_VAULT_KEY) || '[]');
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((entry) => entry && typeof entry.id === 'string'
+        && typeof entry.token === 'string' && entry.token.length >= 20 && entry.token.length <= 256)
+        .slice(0, MAX_SAVED_CREDENTIALS);
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function writeCredentialVault(entries) {
+    try { localStorage.setItem(CREDENTIAL_VAULT_KEY, JSON.stringify(entries.slice(0, MAX_SAVED_CREDENTIALS))); }
+    catch (error) { /* The active credential remains in the compatibility key. */ }
+  }
+
+  function writeToken(token, identity) {
+    try {
+      localStorage.setItem(TOKEN_KEY, token);
+      const vault = readCredentialVault();
+      let entry = vault.find((item) => item.token === token);
+      if (!entry) {
+        entry = {
+          id: crypto.randomUUID ? crypto.randomUUID() : requestId('soul'),
+          token,
+          name: '',
+          tint: null,
+          lastUsedAt: Date.now(),
+        };
+        vault.push(entry);
+      }
+      entry.name = identity && typeof identity.name === 'string' ? identity.name.slice(0, 100) : entry.name;
+      entry.tint = identity && Number.isFinite(identity.tint) ? identity.tint : entry.tint;
+      entry.lastUsedAt = Date.now();
+      vault.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+      writeCredentialVault(vault);
+    }
     catch (error) { /* The current session can continue without persistence. */ }
+  }
+
+  function credentialSummaries() {
+    const active = readToken();
+    return readCredentialVault().map((entry) => ({
+      id: entry.id,
+      name: entry.name || 'an unnamed soul',
+      tint: Number.isFinite(entry.tint) ? entry.tint : null,
+      lastUsedAt: entry.lastUsedAt,
+      active: entry.token === active,
+    }));
+  }
+
+  function apiOrigin() {
+    const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (local) {
+      const bootstrapOverride = window.PondBootstrap && typeof window.PondBootstrap.devApiOverride === 'function'
+        ? window.PondBootstrap.devApiOverride()
+        : null;
+      const override = bootstrapOverride || new URLSearchParams(location.search).get('pondApi');
+      if (override) {
+        try {
+          const parsed = new URL(override);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.origin;
+        } catch (error) { /* Use the standard local Worker. */ }
+      }
+      return 'http://127.0.0.1:8787';
+    }
+    return PRODUCTION_API_ORIGIN;
+  }
+
+  async function readJsonResponse(response) {
+    let body = null;
+    try { body = await response.json(); }
+    catch (error) { body = null; }
+    if (!response.ok) {
+      const failure = new Error(body && (body.message || body.error) || `pond_request_${response.status}`);
+      failure.status = response.status;
+      failure.body = body;
+      throw failure;
+    }
+    return body || {};
   }
 
   class PondClientV2 {
@@ -50,6 +135,9 @@
       this.ripplePoints = [];
       this.rippleTimer = null;
       this.lastRippleBatchAt = 0;
+      this.pendingLinkClaim = window.PondBootstrap && window.PondBootstrap.hasLinkClaim()
+        ? window.PondBootstrap.takeLinkClaim()
+        : null;
     }
 
     on(type, listener) {
@@ -77,8 +165,8 @@
       this.welcomed = false;
       const token = readToken();
       const url = new URL(socketUrl());
+      url.searchParams.delete('token');
       url.searchParams.set('connection', this.connectionId);
-      if (token) url.searchParams.set('token', token);
 
       let socket;
       try { socket = new WebSocket(url); }
@@ -119,8 +207,11 @@
           this.sessionId = message.sessionId;
           this.ownedEntityId = message.ownedEntityId;
           this.welcomed = true;
-          if (message.token) writeToken(message.token);
+          if (message.token) writeToken(message.token, message.identity);
+          else if (token) writeToken(token, message.identity);
           this.flushOutbox();
+        } else if (message.type === 'lifeStarted') {
+          if (message.life && typeof message.life.entityId === 'string') this.ownedEntityId = message.life.entityId;
         } else if (message.type === 'snapshot' && this.identity) {
           const owned = message.snapshot.entities.find((entity) =>
             entity.kind === 'soulFish' && entity.soulId === this.identity.id);
@@ -214,8 +305,213 @@
       return this.send({ v: PROTOCOL_VERSION, type: 'offer', requestId: requestId('offer'), point, offering });
     }
 
+    setSharing(enabled) {
+      return this.send({
+        v: PROTOCOL_VERSION,
+        type: 'setSharing',
+        requestId: requestId('sharing'),
+        enabled: !!enabled,
+      });
+    }
+
+    observePublicSoul(slug) {
+      const normalized = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) || normalized.length > 96) return false;
+      return this.send({
+        v: PROTOCOL_VERSION,
+        type: 'observePublicSoul',
+        requestId: requestId('observe'),
+        slug: normalized,
+      });
+    }
+
+    leavePublicRipple(slug) {
+      const normalized = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) || normalized.length > 96) return false;
+      return this.send({
+        v: PROTOCOL_VERSION,
+        type: 'leavePublicRipple',
+        requestId: requestId('public_ripple'),
+        slug: normalized,
+      });
+    }
+
+    setPondLetter(preference) {
+      const input = preference || {};
+      const message = {
+        v: PROTOCOL_VERSION,
+        type: 'setPondLetter',
+        requestId: requestId('letter'),
+      };
+      if (typeof input.email === 'string') message.email = input.email.trim().slice(0, 254);
+      if (typeof input.mortalLetters === 'boolean') message.mortalLetters = input.mortalLetters;
+      if (typeof input.keeperLetters === 'boolean') message.keeperLetters = input.keeperLetters;
+      return this.send(message);
+    }
+
+    resendPondLetterConfirmation() {
+      return this.send({
+        v: PROTOCOL_VERSION,
+        type: 'resendPondLetterConfirmation',
+        requestId: requestId('letter_resend'),
+      });
+    }
+
+    unsubscribePondLetters() {
+      return this.send({
+        v: PROTOCOL_VERSION,
+        type: 'unsubscribePondLetters',
+        requestId: requestId('letter_stop'),
+      });
+    }
+
     focus(entityId) {
       return this.send({ v: PROTOCOL_VERSION, type: 'focus', requestId: requestId('focus'), entityId });
+    }
+
+    currentToken() {
+      return readToken();
+    }
+
+    credentialSummaries() {
+      return credentialSummaries();
+    }
+
+    adoptCredential(token, identity) {
+      if (typeof token !== 'string' || token.length < 20 || token.length > 256) return false;
+      const current = readToken();
+      if (current && current !== token) writeToken(current, this.identity);
+      writeToken(token, identity);
+      return this.refreshIdentity('returning to a remembered soul');
+    }
+
+    refreshIdentity(closeReason) {
+      if (this.disposed) return false;
+      const previousSocket = this.socket;
+      this.socket = null;
+      this.welcomed = false;
+      this.identity = null;
+      this.sessionId = null;
+      this.ownedEntityId = null;
+      this.outbox.length = 0;
+      if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      if (previousSocket) previousSocket.close(1000, closeReason || 'refreshing the remembered soul');
+      this.connectionId = crypto.randomUUID ? crypto.randomUUID() : requestId('connection');
+      this.connect();
+      return true;
+    }
+
+    switchCredential(id) {
+      if (typeof id !== 'string') return false;
+      const entry = readCredentialVault().find((candidate) => candidate.id === id);
+      if (!entry || entry.token === readToken()) return false;
+      return this.adoptCredential(entry.token, { name: entry.name, tint: entry.tint });
+    }
+
+    async revokeCredential(id) {
+      if (typeof id !== 'string') throw new Error('invalid_credential');
+      const vault = readCredentialVault();
+      const entry = vault.find((candidate) => candidate.id === id);
+      if (!entry) throw new Error('credential_not_found');
+      const headers = new Headers({
+        'Authorization': `Bearer ${entry.token}`,
+        'Content-Type': 'application/json',
+      });
+      const response = await fetch(new URL('/api/v3/credentials/revoke', `${apiOrigin()}/`), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ token: entry.token }),
+        credentials: 'omit',
+        redirect: 'error',
+      });
+      const result = await readJsonResponse(response);
+      if (result.revoked !== true) throw new Error('credential_not_revoked');
+
+      const wasActive = entry.token === readToken();
+      const remaining = vault.filter((candidate) => candidate.id !== id);
+      writeCredentialVault(remaining);
+      let switchedToSavedCredential = false;
+      if (wasActive) {
+        const replacement = remaining[0];
+        if (replacement) {
+          writeToken(replacement.token, { name: replacement.name, tint: replacement.tint });
+          switchedToSavedCredential = readToken() === replacement.token;
+        }
+        if (!switchedToSavedCredential) {
+          try { localStorage.removeItem(TOKEN_KEY); }
+          catch (error) {
+            try { localStorage.setItem(TOKEN_KEY, ''); }
+            catch (storageError) { /* The revoked key remains unusable server-side. */ }
+          }
+        }
+        this.refreshIdentity('forgetting a browser credential');
+      }
+      return { revoked: true, wasActive, switchedToSavedCredential };
+    }
+
+    async requestApi(path, options) {
+      const config = options || {};
+      const headers = new Headers(config.headers || {});
+      if (config.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+      if (config.owner) {
+        const token = readToken();
+        if (!token) throw new Error('pond_owner_credential_missing');
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      const response = await fetch(new URL(path, `${apiOrigin()}/`), {
+        method: config.method || 'GET',
+        headers,
+        body: config.body === undefined ? undefined : JSON.stringify(config.body),
+        credentials: 'omit',
+      });
+      return readJsonResponse(response);
+    }
+
+    async inspectPendingLink() {
+      if (!this.pendingLinkClaim) return { valid: false };
+      return this.requestApi('/api/v3/links/inspect', {
+        method: 'POST',
+        body: { claim: this.pendingLinkClaim },
+      });
+    }
+
+    async redeemPendingLink(options) {
+      if (!this.pendingLinkClaim) return { ok: false, message: 'This pond link has already been used here.' };
+      const claim = this.pendingLinkClaim;
+      const body = { claim };
+      const token = readToken();
+      if (token && !(options && options.allowSoulSwitch)) body.currentToken = token;
+      const result = await this.requestApi('/api/v3/links/redeem', { method: 'POST', body });
+      if (result && result.ok) this.pendingLinkClaim = null;
+      return result;
+    }
+
+    getKeeper() {
+      return this.requestApi('/api/v3/keeper', { owner: true });
+    }
+
+    createKeeperCheckout(interval) {
+      if (interval !== 'month' && interval !== 'year') return Promise.reject(new Error('invalid_keeper_interval'));
+      return this.requestApi('/api/v3/keeper/checkout', {
+        method: 'POST',
+        owner: true,
+        body: { interval },
+      });
+    }
+
+    createKeeperPortal() {
+      return this.requestApi('/api/v3/keeper/portal', { method: 'POST', owner: true, body: {} });
+    }
+
+    updateKeeper(patch) {
+      const input = patch || {};
+      const body = {};
+      if (typeof input.dedication === 'string') {
+        body.dedication = [...input.dedication.replace(/\s+/gu, ' ').trim()].slice(0, 160).join('');
+      }
+      if (typeof input.weeklyLetters === 'boolean') body.weeklyLetters = input.weeklyLetters;
+      return this.requestApi('/api/v3/keeper', { method: 'PATCH', owner: true, body });
     }
 
     serverNow() {

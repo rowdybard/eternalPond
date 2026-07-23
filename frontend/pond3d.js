@@ -2292,6 +2292,12 @@ const TREE_BUILDERS = [makePineTree, makeOakTree, makeBirchTree, makeWillowTree]
 const TREE_PERCHES = [];
 let treeTypeCounter = 0;
 
+function copyBirdPerchAnchor(index, target) {
+  if (TREE_PERCHES.length === 0) return null;
+  const safeIndex = ((Number(index) || 0) % TREE_PERCHES.length + TREE_PERCHES.length) % TREE_PERCHES.length;
+  return (target || new THREE.Vector3()).copy(TREE_PERCHES[safeIndex]);
+}
+
 function makeTree(scale, glow) {
   // Cycle through GLB tree types evenly for consistent distribution
   const availableGLBs = TREE_GLB_KEYS.filter(k => assetCache[k]);
@@ -2371,7 +2377,7 @@ function buildEnvironment() {
     const inward = Math.min(3.5, treeH * 0.08);
     TREE_PERCHES.push(new THREE.Vector3(
       tree.position.x - Math.cos(a) * inward,
-      tree.position.y + treeBox.max.y * 0.68,
+      tree.position.y + treeBox.min.y + treeH * 0.68,
       tree.position.z - Math.sin(a) * inward
     ));
     if (glow && lightsPlaced < faerieLights) {

@@ -11,9 +11,11 @@ import { insertReturningFirstFifo } from "../src/queue";
 import {
   BIRD_PERCH_ANCHORS,
   FROG_HABITAT_ANCHORS,
+  advanceBirdLifecycle,
   advanceEntity,
   applyFrogFeed,
   applySchooling,
+  birdLifecycleTiming,
   canBePredated,
   canPredate,
   createSoulFish,
@@ -22,6 +24,7 @@ import {
   isLegendaryWindow,
   lifespanForSeed,
   selectPredation,
+  startBirdTakeoff,
 } from "../src/simulation";
 
 describe("canonical simulation", () => {
@@ -63,22 +66,65 @@ describe("canonical simulation", () => {
     expect(fastForwardEntity(entity, now + 86_400_000)).toEqual(fastForwardEntity(entity, now + 86_400_000));
   });
 
-  it("keeps canonical birds in circling, shoreline, and perch roles without idle hovering", () => {
+  it("moves every canonical bird through staggered flight, landing, rest, and takeoff phases", () => {
     const now = 1_800_000_000_000;
-    const circling = createWildEntity("bird", 0, now);
-    const foraging = createWildEntity("bird", 1, now);
-    const perched = createWildEntity("bird", 2, now);
-    expect([circling.state.mode, foraging.state.mode, perched.state.mode]).toEqual(["circling", "foraging", "perched"]);
+    const birds = Array.from({ length: 6 }, (_, index) => createWildEntity("bird", index, now));
+    const primary = birds[0]!;
+    expect(birds.map((bird) => bird.state.mode)).toEqual(["circling", "foraging", "perched", "circling", "foraging", "perched"]);
+    expect(new Set(birds.map((bird) => bird.state.nextActionAt)).size).toBe(6);
 
-    const movedCircle = advanceEntity(circling, 20, 0.1, now + 10_000);
-    const movedShore = advanceEntity(foraging, 20, 0.1, now + 10_000);
-    const heldPerch = advanceEntity(perched, 20, 0.1, now + 10_000);
-    expect(Math.hypot(movedCircle.x - 0.5, movedCircle.z - 0.5)).toBeGreaterThan(0.33);
-    expect(Math.hypot(movedShore.x - 0.5, movedShore.z - 0.5)).toBeCloseTo(0.472, 3);
-    expect(heldPerch.x).toBeCloseTo(BIRD_PERCH_ANCHORS[2].x, 5);
-    expect(heldPerch.z).toBeCloseTo(BIRD_PERCH_ANCHORS[2].z, 5);
-    expect(movedCircle.heading).not.toBe(circling.heading);
-    expect(movedShore.heading).not.toBe(foraging.heading);
+    const timing = birdLifecycleTiming(primary.seed);
+    expect(timing.flightMs).toBeGreaterThanOrEqual(22_000);
+    expect(timing.flightMs).toBeLessThanOrEqual(35_000);
+    expect(timing.approachMs).toBeGreaterThanOrEqual(4_000);
+    expect(timing.approachMs).toBeLessThanOrEqual(5_000);
+    expect(timing.restMs).toBeGreaterThanOrEqual(10_000);
+    expect(timing.restMs).toBeLessThanOrEqual(18_000);
+    expect(timing.takeoffMs).toBeGreaterThanOrEqual(3_000);
+    expect(timing.takeoffMs).toBeLessThanOrEqual(4_000);
+
+    const lifecycleBird = {
+      ...primary,
+      state: {
+        ...primary.state,
+        mode: "circling" as const,
+        birdLifecycleAt: now,
+        birdFlightAngle: 0,
+        birdCycle: 0,
+        birdRestMode: "perched" as const,
+        targetAnchor: 2,
+      },
+    };
+    const flying = advanceBirdLifecycle(lifecycleBird, now + 1_000);
+    const approaching = advanceBirdLifecycle(lifecycleBird, now + timing.flightMs + timing.approachMs / 2);
+    const perched = advanceBirdLifecycle(lifecycleBird, now + timing.flightMs + timing.approachMs + timing.restMs / 2);
+    const takingOff = advanceBirdLifecycle(lifecycleBird, now + timing.flightMs + timing.approachMs + timing.restMs + timing.takeoffMs / 2);
+    const flyingAgain = advanceBirdLifecycle(lifecycleBird, now + timing.cycleMs + 1);
+    expect([flying.state.mode, approaching.state.mode, perched.state.mode, takingOff.state.mode, flyingAgain.state.mode])
+      .toEqual(["circling", "approaching", "perched", "takingOff", "circling"]);
+    expect(Math.hypot(flying.x - 0.5, flying.z - 0.5)).toBeGreaterThan(0.33);
+    expect(perched.x).toBeCloseTo(BIRD_PERCH_ANCHORS[2].x, 5);
+    expect(perched.z).toBeCloseTo(BIRD_PERCH_ANCHORS[2].z, 5);
+    expect(approaching.state.transitionEndsAt).toBe(approaching.state.nextActionAt);
+    expect(takingOff.state.birdTakeoffFrom).toBe("perched");
+  });
+
+  it("fast-forwards bird cycles deterministically and makes ripple takeoff idempotent", () => {
+    const now = 1_800_000_000_000;
+    const initial = createWildEntity("bird", 2, now);
+    const timing = birdLifecycleTiming(initial.seed);
+    const farFuture = now + timing.cycleMs * 25_000 + timing.flightMs / 2;
+    expect(fastForwardEntity(initial, farFuture)).toEqual(advanceBirdLifecycle(initial, farFuture));
+
+    const firstTakeoff = startBirdTakeoff(initial, now + 100);
+    expect(firstTakeoff.state.mode).toBe("takingOff");
+    expect(firstTakeoff.state.birdTakeoffFrom).toBe("perched");
+    expect(startBirdTakeoff(firstTakeoff, now + 200)).toBe(firstTakeoff);
+    const midpoint = advanceEntity(firstTakeoff, 1, 0.1, now + 100 + timing.takeoffMs / 2);
+    expect(midpoint.state.mode).toBe("takingOff");
+    expect(midpoint.x).not.toBe(firstTakeoff.x);
+    const airborne = advanceEntity(firstTakeoff, 2, 0.1, firstTakeoff.state.transitionEndsAt ?? 0);
+    expect(airborne.state.mode).toBe("circling");
   });
 
   it("keeps both canonical frogs in deterministic findable habitats", () => {
@@ -204,5 +250,32 @@ describe("canonical simulation", () => {
     expect(accepted.ok).toBe(true);
     expect(rejected.ok).toBe(false);
     expect(rejected.error).toBe("invalid_ripple_batch");
+  });
+
+  it("accepts bounded relationship messages and rejects unsafe public or email inputs", () => {
+    const envelope = { v: PROTOCOL_VERSION, requestId: "growth_01" };
+    const accepted = [
+      { ...envelope, type: "setSharing", enabled: true },
+      { ...envelope, type: "observePublicSoul", slug: "quiet-thistle-under-glass" },
+      { ...envelope, type: "leavePublicRipple", slug: "quiet-thistle-under-glass" },
+      { ...envelope, type: "setPondLetter", email: "pond@example.com", mortalLetters: true },
+      { ...envelope, type: "setPondLetter", keeperLetters: false },
+      { ...envelope, type: "resendPondLetterConfirmation" },
+      { ...envelope, type: "unsubscribePondLetters" },
+    ];
+    for (const message of accepted) expect(parseClientMessage(JSON.stringify(message)).ok).toBe(true);
+
+    const rejected = [
+      { ...envelope, type: "setSharing", enabled: "yes" },
+      { ...envelope, type: "observePublicSoul", slug: "../another-soul" },
+      { ...envelope, type: "leavePublicRipple", slug: "UPPERCASE-SOUL" },
+      { ...envelope, type: "observePublicSoul", slug: `a${"b".repeat(96)}` },
+      { ...envelope, type: "setPondLetter" },
+      { ...envelope, type: "setPondLetter", email: "not-an-email" },
+      { ...envelope, type: "setPondLetter", email: `pond@example.com\u0000` },
+      { ...envelope, type: "setPondLetter", email: `${"a".repeat(245)}@example.com` },
+      { ...envelope, type: "setPondLetter", mortalLetters: "yes" },
+    ];
+    for (const message of rejected) expect(parseClientMessage(JSON.stringify(message)).ok).toBe(false);
   });
 });
