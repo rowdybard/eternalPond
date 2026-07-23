@@ -216,7 +216,7 @@ describe("Eternal Pond canonical Worker", () => {
       const count = state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM founding_ripples").one().count;
       expect(count).toBe(149);
       const version = state.storage.sql.exec<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations").one().version;
-      expect(version).toBe(8);
+      expect(version).toBe(9);
     });
   });
 

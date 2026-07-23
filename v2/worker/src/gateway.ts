@@ -135,6 +135,7 @@ export class PondGatewayV2 extends DurableObject<Env> {
           renderer: parsed.message.renderer,
           reducedMotion: parsed.message.reducedMotion,
           gatewayShard: attachment.gatewayShard,
+          visitId: parsed.message.visitId,
         });
         webSocket.serializeAttachment({ ...result.attachment, initialized: true } satisfies PendingAttachment);
         for (const message of result.messages) this.send(webSocket, message);

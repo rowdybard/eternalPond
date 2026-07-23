@@ -115,6 +115,7 @@ test('the permanent token remains available only in the hello message', () => {
   const hello = JSON.parse(sockets[0].sent[0]);
   assert.equal(hello.type, 'hello');
   assert.equal(hello.token, 'hello-only-token');
+  assert.equal(hello.visitId, 'fixed-connection-id');
   assert.equal(new URL(sockets[0].url).searchParams.has('token'), false);
 });
 

@@ -42,7 +42,7 @@ This is an ecology, not a progression system. Wildlife eats, recovers, grows, re
 - A sparse ecology: 48 canonical wild fish with only 0-3 surfaced at idle, 6 role-driven birds, 2 persistent frogs, and 5 permanent baseline lilies.
 - A live Canvas 2D spectator fallback uses the same protocol without granting birth or offerings.
 
-The data model reserves mortal and memorial life kinds for a future eternal-fish stewardship offering. Payments and memorial creation are deliberately not implemented yet.
+Pond Keeper support uses the existing memorial life kind, but acquisition is a dark launch: purchase UI is hidden and the checkout route returns `404` while `KEEPER_BILLING_ENABLED=false`. Existing activated records retain their canonical fish state and recovery path.
 
 See `3dguide.md` for rendering and architecture details.
 

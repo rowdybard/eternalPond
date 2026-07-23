@@ -21,7 +21,6 @@ export interface PublicSoulView {
     };
   };
   latestMemorial?: {
-    completedAt: number;
     ageText: string;
     rippleAnchor: { x: number; z: number };
   };
@@ -39,6 +38,7 @@ export interface RetentionCohort {
   secondVisitSouls: number;
   secondVisitRate: number | null;
   deliveredLetters: number;
+  eligibleDeliveredLetters: number;
   returnedAfterLetter: number;
   letterReturnRate: number | null;
 }
@@ -55,6 +55,7 @@ export interface RetentionReport {
     returnedSouls: number;
     returnRate: number | null;
     deliveredLetters: number;
+    eligibleDeliveredLetters: number;
     returnedAfterLetter: number;
     letterReturnRate: number | null;
   };
@@ -148,4 +149,5 @@ export interface NormalizedStripeEvent {
   subscription?: NormalizedStripeSubscription;
   invoicePaid?: boolean;
   invoiceFailed?: boolean;
+  paidInvoiceThroughAt?: number | null;
 }

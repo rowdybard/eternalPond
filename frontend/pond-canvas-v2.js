@@ -385,10 +385,11 @@
     const ui = new window.PondUI({ reducedMotion });
     const pond = new CanvasPondV2(canvas, reducedMotion);
     const client = new window.PondClientV2({ renderer: 'canvas', reducedMotion });
-    const publicSlug = publicSlugFromPath();
+    let publicSlug = publicSlugFromPath();
     let publicMemorialTracked = false;
     let memorialReturnPending = false;
     let incarnationBlocked = false;
+    let hasCurrentLife = false;
     pond.setClock(() => client.serverNow());
     ui.setSoundEnabled(false);
     ui.showBirthCue(false);
@@ -400,11 +401,24 @@
       catch (error) { /* Keep the visit-local setting. */ }
     };
 
-    client.on('state', (state) => ui.setConnection(state));
+    function syncPublicRoute() {
+      const nextSlug = publicSlugFromPath();
+      if (nextSlug === publicSlug) return;
+      publicSlug = nextSlug;
+      publicMemorialTracked = false;
+      ui.setPublicSoul(null);
+      if (publicSlug && client.welcomed) client.observePublicSoul(publicSlug);
+    }
+
+    client.on('state', (state) => {
+      ui.setConnection(state);
+      if (state === 'closed' || state === 'connecting') ui.setPublicSoul(null);
+    });
     client.on('message', (serverMessage) => {
       if (serverMessage.type === 'welcome') {
         ui.setWelcome(serverMessage);
         ui.setCredentials(client.credentialSummaries());
+        hasCurrentLife = !!serverMessage.currentLife;
         incarnationBlocked = !!(serverMessage.currentLife && serverMessage.currentLife.status === 'resting');
         if (serverMessage.recentLifeRecord) {
           ui.showLifeEnded(serverMessage.recentLifeRecord.ageText, false, serverMessage.recentLifeRecord.completedAt);
@@ -419,14 +433,15 @@
         pond.applySnapshot(serverMessage.snapshot);
         ui.setSnapshot(serverMessage.snapshot);
         ui.setQueue(null);
-        ui.showBirthCue(!client.ownedEntityId && !incarnationBlocked);
-        if (client.ownedEntityId) ui.awaken();
+        ui.showBirthCue(!client.ownedEntityId && !hasCurrentLife && !incarnationBlocked);
+        if (client.ownedEntityId || hasCurrentLife) ui.awaken();
       } else if (serverMessage.type === 'delta') pond.applyDelta(serverMessage);
       else if (serverMessage.type === 'presence') ui.updatePresence(serverMessage.connectedSouls, serverMessage.capacity);
       else if (serverMessage.type === 'queue') {
         ui.setQueue(serverMessage);
       }
       else if (serverMessage.type === 'lifeStarted') {
+        hasCurrentLife = true;
         incarnationBlocked = false;
         ui.setQueue(null);
         ui.showBirthCue(false);
@@ -436,6 +451,7 @@
           if (serverMessage.reincarnation) window.PondAnalytics.track('reincarnation');
         }
       } else if (serverMessage.type === 'lifeEnded') {
+        hasCurrentLife = false;
         incarnationBlocked = false;
         ui.showLifeEnded(serverMessage.ageText, true, serverMessage.completedAt, serverMessage.memory);
       } else if (serverMessage.type === 'sharingAck') {
@@ -461,6 +477,11 @@
       } else if (serverMessage.type === 'keeperUpdated') {
         ui.setKeeperBusy(false);
         ui.setKeeper(serverMessage.keeper);
+        if (serverMessage.currentLife !== undefined) {
+          hasCurrentLife = !!serverMessage.currentLife;
+          incarnationBlocked = !!(serverMessage.currentLife && serverMessage.currentLife.status === 'resting');
+          ui.setCurrentLife(serverMessage.currentLife, client.serverNow());
+        }
       } else if (serverMessage.type === 'ritualAck' && serverMessage.requestId && serverMessage.requestId.startsWith('public_ripple_')) {
         ui.setPublicRippleBusy(false);
         if (serverMessage.accepted) ui.showNotice('a ripple moves beside this soul');
@@ -618,14 +639,16 @@
       const point = pond.pointAtClient(event.clientX, event.clientY);
       if (!point) return;
       pond.addRitual({ x: point.x, z: point.z, strength: client.ownedEntityId ? 0.5 : 0.72 });
-      if (client.ownedEntityId) client.ripple(point);
+      if (client.ownedEntityId || hasCurrentLife) client.ripple(point);
       else if (!incarnationBlocked) {
         client.incarnate(point);
         ui.showBirthCue(false);
       }
     });
     canvas.addEventListener('pointercancel', () => { pointerStart = null; });
+    addEventListener('popstate', syncPublicRoute);
     addEventListener('beforeunload', () => {
+      ui.setPublicSoul(null);
       client.dispose();
       pond.dispose();
     }, { once: true });

@@ -62,7 +62,7 @@ v2/worker/src/queue.ts             Returning-life priority and FIFO birth queue
 - Capacity is 128 embodied souls with FIFO spectator overflow and returning-life priority.
 - The live local harness passed 100 simultaneous wavers with 1,000 ripple batches and 128 clients with 127 embodied plus one queued spectator alongside the real preview soul.
 - Opaque tokens stay in local storage while only token hashes persist server-side. Generated names remove public free text.
-- `lifeKind: mortal | memorial` and memorial ownership fields are reserved; payments are not implemented.
+- `lifeKind: mortal | memorial` and memorial ownership fields support Pond Keeper, currently dark-launched with purchase UI and checkout disabled by configuration.
 
 ## 7. Local verification
 

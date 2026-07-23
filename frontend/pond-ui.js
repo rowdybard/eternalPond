@@ -436,8 +436,8 @@
         : `${connectedSouls} souls in the pond`;
       this.ledgerSouls.textContent = plural(connectedSouls, 'live soul');
       this.ledgerCapacity.textContent = capacity.queued > 0
-        ? `${plural(capacity.embodied, 'life')} in water, ${plural(capacity.queued, 'soul')} waiting`
-        : `${plural(capacity.embodied, 'life')} in open water`;
+        ? `${plural(capacity.embodied, 'life', 'lives')} in water, ${plural(capacity.queued, 'soul')} waiting`
+        : `${plural(capacity.embodied, 'life', 'lives')} in open water`;
     }
 
     setQueue(message) {
@@ -625,7 +625,16 @@
     setPublicSoul(soul) {
       this.publicSoul = soul || null;
       this.publicSoulCard.hidden = !soul;
-      if (!soul) return;
+      if (!soul) {
+        document.title = 'eternal pond';
+        const canonical = document.querySelector('link[rel="canonical"]');
+        if (canonical) canonical.href = `${location.origin}/`;
+        const ogTitle = document.querySelector('meta[property="og:title"]');
+        const ogUrl = document.querySelector('meta[property="og:url"]');
+        if (ogTitle) ogTitle.content = 'eternal pond';
+        if (ogUrl) ogUrl.content = `${location.origin}/`;
+        return;
+      }
       this.publicSoulName.textContent = soul.name;
       const stateText = soul.status === 'alive'
         ? `${soul.currentLife && soul.currentLife.ageText || 'A living soul'} moves in the shared water.${soul.currentLife && soul.currentLife.remainingPassageText ? ` ${soul.currentLife.remainingPassageText}.` : ''}`

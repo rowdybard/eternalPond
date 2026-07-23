@@ -125,6 +125,7 @@
       this.reconnectAttempt = 0;
       this.clockOffsetMs = 0;
       this.connectionId = crypto.randomUUID ? crypto.randomUUID() : requestId('connection');
+      this.pageVisitId = crypto.randomUUID ? crypto.randomUUID() : requestId('visit');
       this.disposed = false;
       this.welcomed = false;
       this.state = 'idle';
@@ -185,6 +186,7 @@
           renderer: this.renderer,
           reducedMotion: this.reducedMotion,
           clientTime: Date.now(),
+          visitId: this.pageVisitId,
         });
       });
 

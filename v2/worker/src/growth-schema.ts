@@ -1,4 +1,4 @@
-export const GROWTH_SCHEMA_VERSION = 8;
+export const GROWTH_SCHEMA_VERSION = 9;
 
 function hasColumn(sql: SqlStorage, table: string, column: string): boolean {
   const columns = sql.exec<{ [key: string]: SqlStorageValue; name: string }>(`PRAGMA table_info(${table})`).toArray();
@@ -205,5 +205,38 @@ export function installGrowthSchema(sql: SqlStorage, current: number, now: numbe
       sql.exec("ALTER TABLE resend_webhook_events ADD COLUMN bounce_type TEXT");
     }
     sql.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)", now);
+  }
+
+  if (current < 9) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS pond_letter_send_limits (
+        soul_id TEXT PRIMARY KEY,
+        email_hash TEXT NOT NULL,
+        last_reserved_at INTEGER NOT NULL,
+        FOREIGN KEY (soul_id) REFERENCES souls(id)
+      );
+      CREATE TABLE IF NOT EXISTS soul_page_visits (
+        soul_id TEXT NOT NULL,
+        visit_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        first_seen_at INTEGER NOT NULL,
+        counted INTEGER NOT NULL,
+        PRIMARY KEY (soul_id, visit_id),
+        FOREIGN KEY (soul_id) REFERENCES souls(id)
+      );
+    `);
+    if (!hasColumn(sql, "resend_webhook_events", "event_created_at")) {
+      sql.exec("ALTER TABLE resend_webhook_events ADD COLUMN event_created_at INTEGER");
+    }
+    if (!hasColumn(sql, "keeper_checkout_attempts", "customer_id")) {
+      sql.exec("ALTER TABLE keeper_checkout_attempts ADD COLUMN customer_id TEXT");
+    }
+    if (!hasColumn(sql, "email_deliveries", "email_hash")) {
+      sql.exec("ALTER TABLE email_deliveries ADD COLUMN email_hash TEXT");
+    }
+    if (!hasColumn(sql, "email_deliveries", "consent_version")) {
+      sql.exec("ALTER TABLE email_deliveries ADD COLUMN consent_version INTEGER");
+    }
+    sql.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, ?)", now);
   }
 }

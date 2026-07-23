@@ -156,6 +156,8 @@ interface EmailDeliveryRow {
   status: string;
   due_at: number;
   provider_id: string | null;
+  email_hash: string | null;
+  consent_version: number | null;
 }
 
 interface SessionRecord {
@@ -186,6 +188,7 @@ export interface CoreConnectInput {
   renderer: RendererKind;
   reducedMotion: boolean;
   gatewayShard: number;
+  visitId?: string;
 }
 
 export interface CoreConnectionAttachment {
@@ -738,14 +741,6 @@ export class PondCoreV2 extends DurableObject<Env> {
     return count;
   }
 
-  private observedSoulIds(): Set<string> {
-    return new Set(
-      [...this.sessions.values()]
-        .map((session) => session.observedSoulId)
-        .filter((soulId): soulId is string => Boolean(soulId)),
-    );
-  }
-
   private connectedSoulCount(): number {
     return new Set([...this.sessions.values()].map((session) => session.soulId)).size;
   }
@@ -770,12 +765,11 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private getBackgroundCohorts(): BackgroundCohort[] {
     const groups = new Map<string, SimEntity[]>();
-    const observedSoulIds = this.observedSoulIds();
     for (const entity of this.entities.values()) {
       let kind: BackgroundCohort["kind"];
       let key: string;
       if (entity.soulId) {
-        if (entity.foreground || observedSoulIds.has(entity.soulId) || entity.memorialPhase === "dome") continue;
+        if (entity.foreground || entity.memorialPhase === "dome") continue;
         kind = entity.lifeKind === "memorial" ? "memorial" : "mortal";
         key = `${kind}:${Math.abs(entity.tint) % 4}`;
       } else {
@@ -807,6 +801,7 @@ export class PondCoreV2 extends DurableObject<Env> {
       SELECT memories.id AS memory_id, lives.poetic_record, memories.completed_at
       FROM memories JOIN lives ON lives.id = memories.life_id
       WHERE memories.soul_id = ? AND memories.completed_at > ?
+        AND memories.life_kind = 'mortal' AND lives.ended_at IS NOT NULL
       ORDER BY memories.completed_at DESC LIMIT 1
     `, soulId, since).toArray()[0];
     if (!row) return undefined;
@@ -838,11 +833,10 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private wireEntities(now: number): SimEntity[] {
     const visibleWild = this.idleWildIds(now);
-    const observedSoulIds = this.observedSoulIds();
     return [...this.entities.values()].filter((entity) => {
       if (entity.soulId) {
         if (entity.memorialPhase === "dome") return false;
-        return entity.foreground || observedSoulIds.has(entity.soulId);
+        return entity.foreground;
       }
       if (entity.kind === "wildFish") return visibleWild.has(entity.id);
       return true;
@@ -939,13 +933,15 @@ export class PondCoreV2 extends DurableObject<Env> {
       if (row.activated_at === null) state = checkoutPending ? "pending" : eligible ? "eligible" : "none";
       else if (row.rested_at !== null && !paid) state = "resting";
       else if (row.stripe_status === "past_due" && paid) state = "past_due";
-      else if (row.cancel_at_period_end === 1 && paid) state = "canceling";
+      else if ((row.cancel_at_period_end === 1 || row.stripe_status === "canceled") && paid) state = "canceling";
       else if (paid) state = "active";
       else state = "resting";
     }
     const entity = this.findSoulEntity(soulId);
     return {
-      configured,
+      // A disabled billing flag must hide acquisition without erasing an
+      // already-activated Keeper's state and recovery controls.
+      configured: configured || row?.activated_at != null,
       eligible,
       requiresConfirmedEmail: preference.status !== "confirmed",
       state,
@@ -962,6 +958,17 @@ export class PondCoreV2 extends DurableObject<Env> {
       INSERT INTO soul_visits(soul_id, day, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(soul_id, day) DO UPDATE SET last_seen_at = MAX(last_seen_at, excluded.last_seen_at)
     `, soulId, utcDay(now), now, now);
+  }
+
+  private recordPageVisit(soulId: string, visitId: string, now: number, countVisit: boolean): boolean {
+    const inserted = this.ctx.storage.sql.exec(`
+      INSERT OR IGNORE INTO soul_page_visits(soul_id, visit_id, day, first_seen_at, counted)
+      VALUES (?, ?, ?, ?, ?)
+      RETURNING visit_id
+    `, soulId, visitId, utcDay(now), now, countVisit ? 1 : 0).toArray();
+    if (inserted.length === 0 || !countVisit) return false;
+    this.recordVisit(soulId, now);
+    return true;
   }
 
   private recordSoulEvent(soulId: string, eventKind: string, eventAt: number, payload: Record<string, unknown> = {}): void {
@@ -1026,6 +1033,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     let recentLifeRecord: RecentLifeRecord | undefined;
     let presentedTokenHash: string | null = null;
     let returningConnection = false;
+    let createdSoul = false;
     if (input.token && input.token.length >= 20 && input.token.length <= 256) {
       presentedTokenHash = await hashToken(input.token);
       soul = this.findSoulByTokenHash(presentedTokenHash);
@@ -1033,6 +1041,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (!soul) {
       issuedToken = makeToken();
       soul = this.createSoul(await hashToken(issuedToken), now);
+      createdSoul = true;
       this.track("new_soul");
     } else {
       const alreadyPresent = [...this.sessions.values()].some((session) => session.soulId === soul?.id);
@@ -1046,8 +1055,14 @@ export class PondCoreV2 extends DurableObject<Env> {
       }
     }
 
-    this.recordVisit(soul.id, now);
-    if (returningConnection) this.recordSoulEvent(soul.id, "authenticated_connection", now);
+    let countedVisit = false;
+    if (input.visitId) {
+      countedVisit = this.recordPageVisit(soul.id, input.visitId, now, createdSoul || returningConnection);
+    } else if (createdSoul) {
+      this.recordVisit(soul.id, now);
+      countedVisit = true;
+    }
+    if (!createdSoul && countedVisit) this.recordSoulEvent(soul.id, "authenticated_connection", now);
 
     const sessionId = crypto.randomUUID();
     const session: SessionRecord = {
@@ -1326,7 +1341,8 @@ export class PondCoreV2 extends DurableObject<Env> {
       dedication: string | null;
     }>(`
       SELECT public_souls.soul_id, public_souls.slug, souls.poetic_name, souls.tint,
-        souls.completed_lives, keeper_memberships.dedication
+        souls.completed_lives,
+        CASE WHEN keeper_memberships.activated_at IS NOT NULL THEN keeper_memberships.dedication END AS dedication
       FROM public_souls
       JOIN souls ON souls.id = public_souls.soul_id
       LEFT JOIN keeper_memberships ON keeper_memberships.soul_id = souls.id
@@ -1376,7 +1392,6 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (memory) {
       const fallback = deterministicMemorialPoint(row.slug);
       result.latestMemorial = {
-        completedAt: memory.completed_at,
         ageText: memory.poetic_record ?? "one remembered passage",
         rippleAnchor: clampNormalizedPoint({
           x: memory.x ?? fallback.x,
@@ -1385,7 +1400,6 @@ export class PondCoreV2 extends DurableObject<Env> {
       };
     } else if (status === "resting") {
       result.latestMemorial = {
-        completedAt: entity?.updatedAt ?? now,
         ageText: entity?.bornAt ? approximateLifeAge(entity.bornAt, now) : "an eternal passage",
         rippleAnchor: deterministicMemorialPoint(row.slug),
       };
@@ -1400,12 +1414,22 @@ export class PondCoreV2 extends DurableObject<Env> {
     ).toArray()[0] ?? null;
   }
 
+  private reservePondLetterSend(soulId: string, emailHash: string, now: number, cooldownMs: number): boolean {
+    return this.ctx.storage.sql.exec(`
+      INSERT INTO pond_letter_send_limits(soul_id, email_hash, last_reserved_at) VALUES (?, ?, ?)
+      ON CONFLICT(soul_id) DO UPDATE SET
+        email_hash = excluded.email_hash,
+        last_reserved_at = excluded.last_reserved_at
+      WHERE pond_letter_send_limits.last_reserved_at <= ?
+      RETURNING soul_id
+    `, soulId, emailHash, now, now - cooldownMs).toArray().length > 0;
+  }
+
   private async handleSetPondLetter(
     session: SessionRecord,
     message: Extract<ClientMessage, { type: "setPondLetter" }>,
     now: number,
   ): Promise<ServerMessage> {
-    const existing = this.letterPreferenceRow(session.soulId);
     const requestedEmail = message.email === undefined ? null : normalizeEmail(message.email);
     if (message.email !== undefined && requestedEmail === null) {
       return {
@@ -1431,13 +1455,14 @@ export class PondCoreV2 extends DurableObject<Env> {
     let confirmationSent = false;
     if (requestedEmail !== null) {
       const emailHash = await keyedEmailHash(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
-      const sameConfirmedEmail = existing?.email_hash === emailHash && existing.status === "confirmed";
-      const samePendingEmail = existing?.email_hash === emailHash && existing.status === "pending";
+      const latest = this.letterPreferenceRow(session.soulId);
+      const sameConfirmedEmail = latest?.email_hash === emailHash && latest.status === "confirmed";
+      const samePendingEmail = latest?.email_hash === emailHash && latest.status === "pending";
       const globallySuppressed = this.ctx.storage.sql.exec<{ count: number }>(
         "SELECT COUNT(*) AS count FROM email_suppressions WHERE email_hash = ?",
         emailHash,
       ).one().count > 0;
-      if (globallySuppressed || existing?.email_hash === emailHash && existing.status === "suppressed") {
+      if (globallySuppressed || latest?.email_hash === emailHash && latest.status === "suppressed") {
         return {
           v: PROTOCOL_VERSION,
           type: "pondLetterAck",
@@ -1461,8 +1486,18 @@ export class PondCoreV2 extends DurableObject<Env> {
           reason: "email_unavailable",
         };
       }
-      if (!sameConfirmedEmail && !samePendingEmail) {
-        if ((existing?.last_confirmation_sent_at ?? 0) + 60 * 1000 > now) {
+      if (samePendingEmail) {
+        return {
+          v: PROTOCOL_VERSION,
+          type: "pondLetterAck",
+          requestId: message.requestId,
+          accepted: false,
+          preference: this.letterPreferenceSummary(session.soulId),
+          reason: "rate_limited",
+        };
+      }
+      if (!sameConfirmedEmail) {
+        if (!this.reservePondLetterSend(session.soulId, emailHash, now, 60 * 1000)) {
           return {
             v: PROTOCOL_VERSION,
             type: "pondLetterAck",
@@ -1473,34 +1508,66 @@ export class PondCoreV2 extends DurableObject<Env> {
           };
         }
         const encrypted = await encryptText(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
-        const consentVersion = (existing?.consent_version ?? 0) + 1;
-        this.ctx.storage.sql.exec(`
-          INSERT INTO pond_letter_preferences(
-            soul_id, email_ciphertext, email_iv, email_hash, email_masked, encryption_version,
-            status, consent_version, mortal_letters_enabled, keeper_letters_enabled,
-            requested_at, confirmed_at, unsubscribed_at, last_confirmation_sent_at
-          ) VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, NULL, NULL, ?)
-          ON CONFLICT(soul_id) DO UPDATE SET
-            email_ciphertext = excluded.email_ciphertext,
-            email_iv = excluded.email_iv,
-            email_hash = excluded.email_hash,
-            email_masked = excluded.email_masked,
-            encryption_version = 1,
-            status = 'pending',
-            consent_version = excluded.consent_version,
-            mortal_letters_enabled = excluded.mortal_letters_enabled,
-            keeper_letters_enabled = excluded.keeper_letters_enabled,
-            requested_at = excluded.requested_at,
-            confirmed_at = NULL,
-            unsubscribed_at = NULL,
-            last_confirmation_sent_at = excluded.last_confirmation_sent_at
-        `,
-        session.soulId, encrypted.ciphertext, encrypted.iv, emailHash, maskEmail(requestedEmail), consentVersion,
-        message.mortalLetters === false ? 0 : 1,
-        message.keeperLetters === true ? 1 : 0,
-        now, now);
+        const beforeWrite = this.letterPreferenceRow(session.soulId);
+        if (latest && (!beforeWrite
+          || beforeWrite.consent_version !== latest.consent_version
+          || beforeWrite.status !== latest.status
+          || beforeWrite.email_hash !== latest.email_hash)) {
+          return {
+            v: PROTOCOL_VERSION,
+            type: "pondLetterAck",
+            requestId: message.requestId,
+            accepted: false,
+            preference: this.letterPreferenceSummary(session.soulId),
+            reason: "rate_limited",
+          };
+        }
+        const consentVersion = (beforeWrite?.consent_version ?? 0) + 1;
+        const mortalLetters = message.mortalLetters === undefined
+          ? beforeWrite?.mortal_letters_enabled ?? 1
+          : message.mortalLetters ? 1 : 0;
+        const keeperLetters = message.keeperLetters === undefined
+          ? beforeWrite?.keeper_letters_enabled ?? 0
+          : message.keeperLetters ? 1 : 0;
+        try {
+          this.ctx.storage.sql.exec(`
+            INSERT INTO pond_letter_preferences(
+              soul_id, email_ciphertext, email_iv, email_hash, email_masked, encryption_version,
+              status, consent_version, mortal_letters_enabled, keeper_letters_enabled,
+              requested_at, confirmed_at, unsubscribed_at, last_confirmation_sent_at
+            ) VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, NULL, NULL, ?)
+            ON CONFLICT(soul_id) DO UPDATE SET
+              email_ciphertext = excluded.email_ciphertext,
+              email_iv = excluded.email_iv,
+              email_hash = excluded.email_hash,
+              email_masked = excluded.email_masked,
+              encryption_version = 1,
+              status = 'pending',
+              consent_version = excluded.consent_version,
+              mortal_letters_enabled = excluded.mortal_letters_enabled,
+              keeper_letters_enabled = excluded.keeper_letters_enabled,
+              requested_at = excluded.requested_at,
+              confirmed_at = NULL,
+              unsubscribed_at = NULL,
+              last_confirmation_sent_at = excluded.last_confirmation_sent_at
+          `,
+          session.soulId, encrypted.ciphertext, encrypted.iv, emailHash, maskEmail(requestedEmail), consentVersion,
+          mortalLetters,
+          keeperLetters,
+          now, now);
+        } catch {
+          return {
+            v: PROTOCOL_VERSION,
+            type: "pondLetterAck",
+            requestId: message.requestId,
+            accepted: false,
+            preference: this.letterPreferenceSummary(session.soulId),
+            reason: "email_unavailable",
+          };
+        }
         this.ctx.storage.sql.exec(
-          "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND consumed_at IS NULL",
+          `UPDATE secure_link_claims SET consumed_at = ?
+           WHERE soul_id = ? AND purpose IN ('confirm_email', 'unsubscribe') AND consumed_at IS NULL`,
           now, session.soulId,
         );
         const { token } = await this.createSecureClaim(session.soulId, "confirm_email", consentVersion, null, now + GROWTH_DAY_MS, now);
@@ -1558,7 +1625,8 @@ export class PondCoreV2 extends DurableObject<Env> {
         reason: "unchanged",
       };
     }
-    if ((preference.last_confirmation_sent_at ?? 0) + 10 * 60 * 1000 > now) {
+    if (!preference.email_hash
+      || !this.reservePondLetterSend(session.soulId, preference.email_hash, now, 10 * 60 * 1000)) {
       return {
         v: PROTOCOL_VERSION,
         type: "pondLetterAck",
@@ -1572,6 +1640,10 @@ export class PondCoreV2 extends DurableObject<Env> {
       "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND purpose = 'confirm_email' AND consumed_at IS NULL",
       now, session.soulId,
     );
+    this.ctx.storage.sql.exec(
+      "UPDATE pond_letter_preferences SET last_confirmation_sent_at = ? WHERE soul_id = ?",
+      now, session.soulId,
+    );
     const { token } = await this.createSecureClaim(
       session.soulId,
       "confirm_email",
@@ -1579,10 +1651,6 @@ export class PondCoreV2 extends DurableObject<Env> {
       null,
       now + GROWTH_DAY_MS,
       now,
-    );
-    this.ctx.storage.sql.exec(
-      "UPDATE pond_letter_preferences SET last_confirmation_sent_at = ? WHERE soul_id = ?",
-      now, session.soulId,
     );
     const deliveryId = this.createEmailDelivery(
       `confirmation:${session.soulId}:${preference.consent_version}:${now}`,
@@ -1613,7 +1681,8 @@ export class PondCoreV2 extends DurableObject<Env> {
         WHERE soul_id = ?
       `, now, session.soulId);
       this.ctx.storage.sql.exec(
-        "UPDATE secure_link_claims SET consumed_at = ? WHERE soul_id = ? AND consumed_at IS NULL",
+        `UPDATE secure_link_claims SET consumed_at = ?
+         WHERE soul_id = ? AND purpose IN ('confirm_email', 'unsubscribe') AND consumed_at IS NULL`,
         now, session.soulId,
       );
       this.ctx.storage.sql.exec(
@@ -1721,9 +1790,9 @@ export class PondCoreV2 extends DurableObject<Env> {
 
     const now = Date.now();
     const marked = this.ctx.storage.sql.exec(`
-      UPDATE email_deliveries SET status = 'sending', attempted_at = ?
+      UPDATE email_deliveries SET status = 'sending', attempted_at = ?, email_hash = ?, consent_version = ?
       WHERE id = ? AND status = 'pending' RETURNING id
-    `, now, row.id).toArray();
+    `, now, preference.email_hash, preference.consent_version, row.id).toArray();
     if (marked.length === 0) return false;
 
     let providerCallStarted = false;
@@ -1771,6 +1840,25 @@ export class PondCoreV2 extends DurableObject<Env> {
         opening = this.keeperWeeklyNote(row.soul_id);
       }
       const action = row.delivery_kind === "confirmation" ? "Confirm Pond Letters" : "Return to the pond";
+      const currentPreference = this.letterPreferenceRow(row.soul_id);
+      const currentConsent = currentPreference?.email_hash === preference.email_hash
+        && currentPreference.consent_version === preference.consent_version
+        && (row.delivery_kind === "confirmation"
+          ? currentPreference.status === "pending"
+          : currentPreference.status === "confirmed")
+        && (row.delivery_kind !== "mortal_death" || currentPreference.mortal_letters_enabled === 1)
+        && (row.delivery_kind !== "keeper_weekly" || currentPreference.keeper_letters_enabled === 1);
+      const suppressed = preference.email_hash !== null && this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM email_suppressions WHERE email_hash = ?",
+        preference.email_hash,
+      ).one().count > 0;
+      if (!currentConsent || suppressed) {
+        this.ctx.storage.sql.exec(
+          "UPDATE email_deliveries SET status = ?, failure_code = 'consent_changed' WHERE id = ? AND status = 'sending'",
+          suppressed || currentPreference?.status === "suppressed" ? "suppressed" : "skipped", row.id,
+        );
+        return false;
+      }
       providerCallStarted = true;
       const result = await sendPondEmail(this.env, {
         to: recipient,
@@ -1784,15 +1872,20 @@ export class PondCoreV2 extends DurableObject<Env> {
         "UPDATE email_deliveries SET status = 'sent', sent_at = ?, provider_id = ? WHERE id = ? AND status = 'sending'",
         Date.now(), result.providerId, row.id,
       );
-      const storedOutcome = this.ctx.storage.sql.exec<{ event_type: string; received_at: number; bounce_type: string | null }>(`
-        SELECT event_type, received_at, bounce_type FROM resend_webhook_events
+      const storedOutcome = this.ctx.storage.sql.exec<{
+        event_type: string;
+        event_created_at: number | null;
+        received_at: number;
+        bounce_type: string | null;
+      }>(`
+        SELECT event_type, event_created_at, received_at, bounce_type FROM resend_webhook_events
         WHERE provider_id = ? ORDER BY received_at DESC LIMIT 1
       `, result.providerId).toArray()[0];
       if (storedOutcome) {
         this.applyResendOutcome(
           result.providerId,
           storedOutcome.event_type,
-          storedOutcome.received_at,
+          storedOutcome.event_created_at ?? storedOutcome.received_at,
           storedOutcome.bounce_type,
         );
       }
@@ -1808,13 +1901,17 @@ export class PondCoreV2 extends DurableObject<Env> {
 
   private keeperWeeklyNote(soulId: string): string {
     const recent = this.ctx.storage.sql.exec<{ event_kind: string; event_at: number }>(
-      "SELECT event_kind, event_at FROM soul_events WHERE soul_id = ? AND event_at >= ? ORDER BY event_at DESC LIMIT 1",
+      `SELECT event_kind, event_at FROM soul_events
+       WHERE soul_id = ? AND event_at >= ?
+         AND event_kind IN ('public_ripple', 'life_started', 'life_ended', 'keeper_consecrated', 'keeper_rested', 'sharing_enabled')
+       ORDER BY event_at DESC LIMIT 1`,
       soulId, Date.now() - 7 * GROWTH_DAY_MS,
     ).toArray()[0];
     if (recent?.event_kind === "public_ripple") return "Someone left a quiet ripple beside this soul.";
     if (recent?.event_kind === "life_started") return "A new passage began for this soul in the pond.";
     if (recent?.event_kind === "life_ended") return "The pond carried this soul's mortal passage into memory.";
     if (recent?.event_kind === "keeper_consecrated") return "This soul entered its eternal passage without losing its place in the water.";
+    if (recent?.event_kind === "keeper_rested") return "This eternal soul came to rest beneath the memorial dome.";
     if (recent?.event_kind === "sharing_enabled") return "A quiet path to this soul was opened beyond the pond.";
     const entity = this.findSoulEntity(soulId);
     if (entity?.memorialPhase === "dome") return "This eternal soul is resting beneath the memorial dome.";
@@ -2531,6 +2628,20 @@ export class PondCoreV2 extends DurableObject<Env> {
     return this.env.POND_GATEWAY.getByName(`v2-gateway-${shard}`);
   }
 
+  private async deliverKeeperUpdate(soulId: string): Promise<void> {
+    const sessions = [...this.sessions.values()].filter((session) => session.soulId === soulId);
+    if (sessions.length === 0) return;
+    const message: ServerMessage = {
+      v: PROTOCOL_VERSION,
+      type: "keeperUpdated",
+      requestId: `keeper_${this.sequence}_${Date.now()}`,
+      keeper: this.keeperSummary(soulId),
+      currentLife: this.currentLifeSummary(soulId),
+    };
+    await Promise.all(sessions.map((session) =>
+      this.gateway(session.gatewayShard).deliverToSession(session.sessionId, [message])));
+  }
+
   private async broadcastDelta(now: number): Promise<void> {
     if (this.activeGatewayShards.size === 0) return;
     const current = new Map(this.wireEntities(now).map((entity) => [entity.id, entityForWire(entity)]));
@@ -2728,12 +2839,14 @@ export class PondCoreV2 extends DurableObject<Env> {
       consumed_at: number | null;
       poetic_name: string;
       current_consent_version: number | null;
+      preference_status: LetterPreferenceSummary["status"] | null;
       slug: string | null;
       disabled_at: number | null;
     }>(`
       SELECT secure_link_claims.purpose, secure_link_claims.soul_id, secure_link_claims.expires_at,
         secure_link_claims.consent_version, secure_link_claims.consumed_at, souls.poetic_name,
         pond_letter_preferences.consent_version AS current_consent_version,
+        pond_letter_preferences.status AS preference_status,
         public_souls.slug, public_souls.disabled_at
       FROM secure_link_claims
       JOIN souls ON souls.id = secure_link_claims.soul_id
@@ -2742,8 +2855,12 @@ export class PondCoreV2 extends DurableObject<Env> {
       WHERE secure_link_claims.token_hash = ?
     `, tokenHash).toArray()[0];
     const now = Date.now();
-    if (!row || row.consumed_at !== null || row.current_consent_version !== row.consent_version
-      || row.expires_at !== null && row.expires_at <= now) return { valid: false };
+    if (!row || row.consumed_at !== null || row.expires_at !== null && row.expires_at <= now) return { valid: false };
+    if (row.purpose !== "return_soul" && row.current_consent_version !== row.consent_version) return { valid: false };
+    if (row.purpose === "confirm_email" && row.preference_status !== "pending") return { valid: false };
+    if (row.purpose === "unsubscribe" && row.preference_status !== "pending" && row.preference_status !== "confirmed") {
+      return { valid: false };
+    }
     return {
       valid: true,
       purpose: row.purpose,
@@ -2761,8 +2878,9 @@ export class PondCoreV2 extends DurableObject<Env> {
       soul_id: string;
       purpose: "confirm_email" | "return_soul" | "unsubscribe";
       consent_version: number;
+      expires_at: number | null;
     }>(`
-      SELECT soul_id, purpose, consent_version FROM secure_link_claims
+      SELECT soul_id, purpose, consent_version, expires_at FROM secure_link_claims
       WHERE token_hash = ? AND consumed_at IS NULL
     `, tokenHash).toArray()[0];
     if (!claim) return { ok: false, message: "invalid_or_expired" };
@@ -2780,6 +2898,19 @@ export class PondCoreV2 extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    if (claim.expires_at !== null && claim.expires_at <= now) return { ok: false, message: "invalid_or_expired" };
+    if (claim.purpose !== "return_soul") {
+      const preference = this.ctx.storage.sql.exec<{ status: string; consent_version: number }>(
+        "SELECT status, consent_version FROM pond_letter_preferences WHERE soul_id = ?",
+        claim.soul_id,
+      ).toArray()[0];
+      const validStatus = claim.purpose === "confirm_email"
+        ? preference?.status === "pending"
+        : preference?.status === "pending" || preference?.status === "confirmed";
+      if (!preference || preference.consent_version !== claim.consent_version || !validStatus) {
+        return { ok: false, message: "invalid_or_expired" };
+      }
+    }
     let issuedToken: string | undefined;
     let issuedHash: string | undefined;
     if (claim.purpose === "return_soul") {
@@ -2794,10 +2925,12 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (consumed.length === 0) return { ok: false, message: "already_used" };
 
     if (claim.purpose === "confirm_email") {
-      this.ctx.storage.sql.exec(`
+      const confirmed = this.ctx.storage.sql.exec(`
         UPDATE pond_letter_preferences SET status = 'confirmed', confirmed_at = ?, unsubscribed_at = NULL
         WHERE soul_id = ? AND consent_version = ? AND status = 'pending'
+        RETURNING soul_id
       `, now, claim.soul_id, claim.consent_version);
+      if (confirmed.toArray().length === 0) return { ok: false, message: "invalid_or_expired" };
       this.ctx.storage.sql.exec(`
         UPDATE email_deliveries SET status = 'pending', due_at = ?
         WHERE soul_id = ? AND status = 'waiting_confirmation' AND delivery_kind = 'mortal_death'
@@ -2811,11 +2944,13 @@ export class PondCoreV2 extends DurableObject<Env> {
       );
       this.recordSoulEvent(claim.soul_id, "credential_recovered", now);
     } else if (claim.purpose === "unsubscribe") {
-      this.ctx.storage.sql.exec(`
+      const unsubscribed = this.ctx.storage.sql.exec(`
         UPDATE pond_letter_preferences SET status = 'unsubscribed', consent_version = consent_version + 1,
           mortal_letters_enabled = 0, keeper_letters_enabled = 0, unsubscribed_at = ?
-        WHERE soul_id = ? AND consent_version = ?
+        WHERE soul_id = ? AND consent_version = ? AND status IN ('pending', 'confirmed')
+        RETURNING soul_id
       `, now, claim.soul_id, claim.consent_version);
+      if (unsubscribed.toArray().length === 0) return { ok: false, message: "invalid_or_expired" };
       this.ctx.storage.sql.exec(
         "UPDATE email_deliveries SET status = 'skipped', failure_code = 'unsubscribed' WHERE soul_id = ? AND status IN ('pending', 'waiting_confirmation')",
         claim.soul_id,
@@ -2848,11 +2983,14 @@ export class PondCoreV2 extends DurableObject<Env> {
     ).one().count > 0;
     if (duplicate) return { duplicate: true };
     this.ctx.storage.sql.exec(
-      "INSERT INTO resend_webhook_events(id, event_type, provider_id, received_at, bounce_type) VALUES (?, ?, ?, ?, ?)",
-      input.webhookId, input.eventType, input.providerId, input.receivedAt, input.bounceType ?? null,
+      `INSERT INTO resend_webhook_events(
+        id, event_type, provider_id, received_at, bounce_type, event_created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      input.webhookId, input.eventType, input.providerId, input.receivedAt,
+      input.bounceType ?? null, input.eventCreatedAt,
     );
     if (input.providerId) {
-      this.applyResendOutcome(input.providerId, input.eventType, input.receivedAt, input.bounceType);
+      this.applyResendOutcome(input.providerId, input.eventType, input.eventCreatedAt, input.bounceType);
     }
     return { duplicate: false };
   }
@@ -2866,8 +3004,12 @@ export class PondCoreV2 extends DurableObject<Env> {
       return;
     }
     if (eventType !== "email.bounced" && eventType !== "email.complained") return;
-    const delivery = this.ctx.storage.sql.exec<{ soul_id: string }>(
-      "SELECT soul_id FROM email_deliveries WHERE provider_id = ?",
+    const delivery = this.ctx.storage.sql.exec<{
+      soul_id: string;
+      email_hash: string | null;
+      consent_version: number | null;
+    }>(
+      "SELECT soul_id, email_hash, consent_version FROM email_deliveries WHERE provider_id = ?",
       providerId,
     ).toArray()[0];
     if (!delivery) return;
@@ -2881,10 +3023,7 @@ export class PondCoreV2 extends DurableObject<Env> {
       failureCode, providerId,
     );
     if (eventType === "email.bounced" && !hardBounce) return;
-    const suppressedEmail = this.ctx.storage.sql.exec<{ email_hash: string | null }>(
-      "SELECT email_hash FROM pond_letter_preferences WHERE soul_id = ?",
-      delivery.soul_id,
-    ).toArray()[0]?.email_hash;
+    const suppressedEmail = delivery.email_hash;
     if (suppressedEmail) {
       this.ctx.storage.sql.exec(`
         INSERT INTO email_suppressions(email_hash, reason, suppressed_at) VALUES (?, ?, ?)
@@ -2893,12 +3032,15 @@ export class PondCoreV2 extends DurableObject<Env> {
     }
     this.ctx.storage.sql.exec(`
       UPDATE pond_letter_preferences SET status = 'suppressed', mortal_letters_enabled = 0,
-        keeper_letters_enabled = 0 WHERE soul_id = ?
-    `, delivery.soul_id);
-    this.ctx.storage.sql.exec(
-      "UPDATE email_deliveries SET status = 'suppressed', failure_code = ? WHERE soul_id = ? AND status IN ('pending', 'waiting_confirmation')",
-      failureCode, delivery.soul_id,
-    );
+        keeper_letters_enabled = 0 WHERE soul_id = ? AND email_hash = ?
+    `, delivery.soul_id, suppressedEmail);
+    if (suppressedEmail) {
+      this.ctx.storage.sql.exec(
+        `UPDATE email_deliveries SET status = 'suppressed', failure_code = ?
+         WHERE soul_id = ? AND email_hash = ? AND status IN ('pending', 'waiting_confirmation')`,
+        failureCode, delivery.soul_id, suppressedEmail,
+      );
+    }
   }
 
   async getRetentionReport(input: { from: string; to: string }): Promise<RetentionReport> {
@@ -2906,14 +3048,19 @@ export class PondCoreV2 extends DurableObject<Env> {
     const toStart = utcDayStart(input.to);
     if (fromStart === null || toStart === null || fromStart > toStart) throw new Error("invalid_date_range");
     const now = Date.now();
-    const credentialRows = this.ctx.storage.sql.exec<{ soul_id: string; created_at: number }>(
-      "SELECT soul_id, created_at FROM soul_credentials",
-    ).toArray();
+    const credentialRows = this.ctx.storage.sql.exec<{ soul_id: string; created_at: number }>(`
+      SELECT soul_id, MIN(created_at) AS created_at FROM soul_credentials GROUP BY soul_id
+    `).toArray();
     const lifeRows = this.ctx.storage.sql.exec<{
       soul_id: string;
       started_at: number;
       ended_at: number | null;
-    }>("SELECT soul_id, started_at, ended_at FROM lives WHERE soul_id IS NOT NULL ORDER BY started_at").toArray();
+    }>(`
+      SELECT lives.soul_id, lives.started_at, lives.ended_at FROM lives
+      WHERE lives.soul_id IS NOT NULL
+        AND lives.started_at = (SELECT MIN(first_life.started_at) FROM lives AS first_life WHERE first_life.soul_id = lives.soul_id)
+      ORDER BY lives.started_at
+    `).toArray();
     const visitRows = this.ctx.storage.sql.exec<{ soul_id: string; day: string }>(
       "SELECT soul_id, day FROM soul_visits",
     ).toArray();
@@ -2931,7 +3078,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     const firstCredential = new Map<string, number>();
     const credentialsByDay = new Map<string, number>();
     for (const row of credentialRows) {
-      firstCredential.set(row.soul_id, Math.min(firstCredential.get(row.soul_id) ?? Number.MAX_SAFE_INTEGER, row.created_at));
+      firstCredential.set(row.soul_id, row.created_at);
       const day = utcDay(row.created_at);
       credentialsByDay.set(day, (credentialsByDay.get(day) ?? 0) + 1);
     }
@@ -2961,27 +3108,35 @@ export class PondCoreV2 extends DurableObject<Env> {
       connectionsBySoul.set(row.soul_id, timestamps);
     }
     const soulsByBirthDay = new Map<string, string[]>();
+    const birthCompletionsByCredentialDay = new Map<string, number>();
     for (const [soulId, birth] of firstBirth) {
       const day = utcDay(birth.startedAt);
       const soulIds = soulsByBirthDay.get(day) ?? [];
       soulIds.push(soulId);
       soulsByBirthDay.set(day, soulIds);
+      const credentialAt = firstCredential.get(soulId);
+      if (credentialAt !== undefined && birth.startedAt >= credentialAt
+        && birth.startedAt <= credentialAt + GROWTH_DAY_MS) {
+        const credentialDay = utcDay(credentialAt);
+        birthCompletionsByCredentialDay.set(
+          credentialDay,
+          (birthCompletionsByCredentialDay.get(credentialDay) ?? 0) + 1,
+        );
+      }
     }
 
     const cohorts: RetentionCohort[] = [];
     for (let dayStart = fromStart; dayStart <= toStart; dayStart += GROWTH_DAY_MS) {
       const day = utcDay(dayStart);
       const soulIds = soulsByBirthDay.get(day) ?? [];
-      let birthCompletions24h = 0;
+      const birthCompletions24h = birthCompletionsByCredentialDay.get(day) ?? 0;
       let eligibleSouls = 0;
       let returnedSouls = 0;
       let secondVisitSouls = 0;
       let deliveredLetters = 0;
+      let eligibleDeliveredLetters = 0;
       let returnedAfterLetter = 0;
       for (const soulId of soulIds) {
-        const birth = firstBirth.get(soulId);
-        const credentialAt = firstCredential.get(soulId);
-        if (birth && credentialAt !== undefined && birth.startedAt <= credentialAt + GROWTH_DAY_MS) birthCompletions24h++;
         const visitDays = visitsBySoul.get(soulId) ?? new Set<string>();
         const laterVisit = [...visitDays].some((visitDay) => visitDay > day);
         if (laterVisit) secondVisitSouls++;
@@ -2993,6 +3148,8 @@ export class PondCoreV2 extends DurableObject<Env> {
         }
         for (const deliveredAt of deliveriesBySoul.get(soulId) ?? []) {
           deliveredLetters++;
+          if (now < deliveredAt + 8 * GROWTH_DAY_MS) continue;
+          eligibleDeliveredLetters++;
           const returned = (connectionsBySoul.get(soulId) ?? []).some((connectedAt) =>
             connectedAt > deliveredAt && connectedAt <= deliveredAt + 8 * GROWTH_DAY_MS);
           if (returned) returnedAfterLetter++;
@@ -3010,16 +3167,24 @@ export class PondCoreV2 extends DurableObject<Env> {
         secondVisitSouls,
         secondVisitRate: fraction(secondVisitSouls, soulIds.length),
         deliveredLetters,
+        eligibleDeliveredLetters,
         returnedAfterLetter,
-        letterReturnRate: fraction(returnedAfterLetter, deliveredLetters),
+        letterReturnRate: fraction(returnedAfterLetter, eligibleDeliveredLetters),
       });
     }
     const totals = cohorts.reduce((result, cohort) => ({
       eligibleSouls: result.eligibleSouls + cohort.eligibleSouls,
       returnedSouls: result.returnedSouls + cohort.returnedSouls,
       deliveredLetters: result.deliveredLetters + cohort.deliveredLetters,
+      eligibleDeliveredLetters: result.eligibleDeliveredLetters + cohort.eligibleDeliveredLetters,
       returnedAfterLetter: result.returnedAfterLetter + cohort.returnedAfterLetter,
-    }), { eligibleSouls: 0, returnedSouls: 0, deliveredLetters: 0, returnedAfterLetter: 0 });
+    }), {
+      eligibleSouls: 0,
+      returnedSouls: 0,
+      deliveredLetters: 0,
+      eligibleDeliveredLetters: 0,
+      returnedAfterLetter: 0,
+    });
     return {
       generatedAt: now,
       timezone: "UTC",
@@ -3030,7 +3195,7 @@ export class PondCoreV2 extends DurableObject<Env> {
       totals: {
         ...totals,
         returnRate: fraction(totals.returnedSouls, totals.eligibleSouls),
-        letterReturnRate: fraction(totals.returnedAfterLetter, totals.deliveredLetters),
+        letterReturnRate: fraction(totals.returnedAfterLetter, totals.eligibleDeliveredLetters),
       },
       cohorts,
     };
@@ -3090,8 +3255,9 @@ export class PondCoreV2 extends DurableObject<Env> {
       idempotency_key: string;
       stripe_session_id: string | null;
       billing_interval: "month" | "year";
+      customer_id: string | null;
     }>(`
-      SELECT id, idempotency_key, stripe_session_id, billing_interval FROM keeper_checkout_attempts
+      SELECT id, idempotency_key, stripe_session_id, billing_interval, customer_id FROM keeper_checkout_attempts
       WHERE membership_id = ? AND state IN ('pending', 'created') AND expires_at > ?
       ORDER BY created_at DESC LIMIT 1
     `, membership.id, now).toArray()[0];
@@ -3101,7 +3267,7 @@ export class PondCoreV2 extends DurableObject<Env> {
         ok: true,
         attemptId: existing.id,
         membershipRef: membership.id,
-        customerId: membership.stripe_customer_id ?? undefined,
+        customerId: existing.customer_id ?? undefined,
         idempotencyKey: existing.idempotency_key,
         existingSessionId: existing.stripe_session_id ?? undefined,
         inProgress: existing.stripe_session_id === null,
@@ -3111,9 +3277,10 @@ export class PondCoreV2 extends DurableObject<Env> {
     const idempotencyKey = `keeper-checkout:${randomToken(20)}`;
     this.ctx.storage.sql.exec(`
       INSERT INTO keeper_checkout_attempts(
-        id, membership_id, idempotency_key, billing_interval, state, expires_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
-    `, attemptId, membership.id, idempotencyKey, input.interval, now + 30 * 60 * 1000, now, now);
+        id, membership_id, idempotency_key, billing_interval, state, expires_at, created_at, updated_at, customer_id
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    `, attemptId, membership.id, idempotencyKey, input.interval, now + 30 * 60 * 1000,
+    now, now, membership.stripe_customer_id);
     return {
       ok: true,
       attemptId,
@@ -3155,7 +3322,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     const soul = await this.authenticateToken(input.token);
     if (!soul) return null;
     const membership = this.ctx.storage.sql.exec<{ id: string }>(
-      "SELECT id FROM keeper_memberships WHERE soul_id = ?",
+      "SELECT id FROM keeper_memberships WHERE soul_id = ? AND activated_at IS NOT NULL",
       soul.id,
     ).toArray()[0];
     if (!membership) return this.keeperSummary(soul.id);
@@ -3199,7 +3366,12 @@ export class PondCoreV2 extends DurableObject<Env> {
       soul_id: string;
       activated_at: number | null;
       paid_through_at: number | null;
-    }>("SELECT id, soul_id, activated_at, paid_through_at FROM keeper_memberships WHERE id = ?", membershipRef).toArray()[0] : undefined;
+      rested_at: number | null;
+      current_subscription_id: string | null;
+    }>(`
+      SELECT id, soul_id, activated_at, paid_through_at, rested_at, current_subscription_id
+      FROM keeper_memberships WHERE id = ?
+    `, membershipRef).toArray()[0] : undefined;
     this.ctx.storage.sql.exec(`
       INSERT INTO stripe_webhook_events(event_id, event_type, object_id, event_created_at, processed_at)
       VALUES (?, ?, ?, ?, ?)
@@ -3207,10 +3379,15 @@ export class PondCoreV2 extends DurableObject<Env> {
     if (!membership) return { duplicate: false };
 
     if (input.checkout) {
+      const mayLinkCheckout = membership.current_subscription_id === null
+        || membership.rested_at !== null && (membership.paid_through_at ?? 0) <= Date.now();
       this.ctx.storage.sql.exec(`
-        UPDATE keeper_memberships SET stripe_customer_id = COALESCE(?, stripe_customer_id),
-          current_subscription_id = COALESCE(?, current_subscription_id), updated_at = ? WHERE id = ?
-      `, input.checkout.customerId, input.checkout.subscriptionId, Date.now(), membership.id);
+        UPDATE keeper_memberships SET stripe_customer_id = COALESCE(stripe_customer_id, ?),
+          current_subscription_id = CASE WHEN ? = 1 THEN COALESCE(?, current_subscription_id)
+            ELSE current_subscription_id END,
+          updated_at = ? WHERE id = ?
+      `, input.checkout.customerId, mayLinkCheckout ? 1 : 0,
+      input.checkout.subscriptionId, Date.now(), membership.id);
       if (input.objectId) {
         this.ctx.storage.sql.exec(`
           UPDATE keeper_checkout_attempts SET state = 'created', updated_at = ?
@@ -3219,7 +3396,10 @@ export class PondCoreV2 extends DurableObject<Env> {
       }
     }
     const subscription = input.subscription;
-    if (!subscription) return { duplicate: false };
+    if (!subscription) {
+      await this.deliverKeeperUpdate(membership.soul_id);
+      return { duplicate: false };
+    }
     const expectedPrice = subscription.interval === "month"
       ? this.env.STRIPE_MONTHLY_PRICE_ID
       : subscription.interval === "year" ? this.env.STRIPE_ANNUAL_PRICE_ID : null;
@@ -3229,7 +3409,10 @@ export class PondCoreV2 extends DurableObject<Env> {
       "SELECT last_event_created_at, paid_through_at FROM keeper_subscriptions WHERE stripe_subscription_id = ?",
       subscription.subscriptionId,
     ).toArray()[0];
-    const paidThrough = Math.max(previous?.paid_through_at ?? 0, membership.paid_through_at ?? 0, subscription.paidThroughAt ?? 0) || null;
+    const paidGrant = input.invoicePaid && input.paidInvoiceThroughAt && input.paidInvoiceThroughAt > 0
+      ? input.paidInvoiceThroughAt
+      : null;
+    const subscriptionPaidThrough = Math.max(previous?.paid_through_at ?? 0, paidGrant ?? 0) || null;
     this.ctx.storage.sql.exec(`
       INSERT INTO keeper_subscriptions(
         stripe_subscription_id, membership_id, stripe_customer_id, stripe_price_id, billing_interval,
@@ -3237,35 +3420,73 @@ export class PondCoreV2 extends DurableObject<Env> {
         last_event_created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(stripe_subscription_id) DO UPDATE SET
-        stripe_customer_id = excluded.stripe_customer_id,
-        stripe_price_id = excluded.stripe_price_id,
-        billing_interval = excluded.billing_interval,
-        stripe_status = excluded.stripe_status,
-        cancel_at_period_end = excluded.cancel_at_period_end,
-        paid_through_at = MAX(COALESCE(keeper_subscriptions.paid_through_at, 0), COALESCE(excluded.paid_through_at, 0)),
-        ended_at = excluded.ended_at,
+        stripe_customer_id = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.stripe_customer_id ELSE keeper_subscriptions.stripe_customer_id END,
+        stripe_price_id = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.stripe_price_id ELSE keeper_subscriptions.stripe_price_id END,
+        billing_interval = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.billing_interval ELSE keeper_subscriptions.billing_interval END,
+        stripe_status = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.stripe_status ELSE keeper_subscriptions.stripe_status END,
+        cancel_at_period_end = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.cancel_at_period_end ELSE keeper_subscriptions.cancel_at_period_end END,
+        paid_through_at = CASE
+          WHEN excluded.paid_through_at IS NULL THEN keeper_subscriptions.paid_through_at
+          WHEN keeper_subscriptions.paid_through_at IS NULL THEN excluded.paid_through_at
+          ELSE MAX(keeper_subscriptions.paid_through_at, excluded.paid_through_at)
+        END,
+        ended_at = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.ended_at ELSE keeper_subscriptions.ended_at END,
         last_event_created_at = MAX(keeper_subscriptions.last_event_created_at, excluded.last_event_created_at),
-        updated_at = excluded.updated_at
+        updated_at = CASE WHEN excluded.last_event_created_at >= keeper_subscriptions.last_event_created_at
+          THEN excluded.updated_at ELSE keeper_subscriptions.updated_at END
     `,
     subscription.subscriptionId, membership.id, subscription.customerId, subscription.priceId,
-    subscription.interval, subscription.status, subscription.cancelAtPeriodEnd ? 1 : 0, paidThrough,
+    subscription.interval, subscription.status, subscription.cancelAtPeriodEnd ? 1 : 0, subscriptionPaidThrough,
     input.createdAt, subscription.status === "canceled" ? input.createdAt : null,
     Math.max(previous?.last_event_created_at ?? 0, input.createdAt), now);
+    const refreshedMembership = this.ctx.storage.sql.exec<{
+      activated_at: number | null;
+      paid_through_at: number | null;
+      current_subscription_id: string | null;
+    }>(`
+      SELECT activated_at, paid_through_at, current_subscription_id
+      FROM keeper_memberships WHERE id = ?
+    `, membership.id).one();
+    const provenPaidActivation = input.invoicePaid === true
+      && subscription.status === "active"
+      && paidGrant !== null
+      && paidGrant > now;
+    const canonicalSubscription = refreshedMembership.current_subscription_id === null
+      || refreshedMembership.current_subscription_id === subscription.subscriptionId
+      || provenPaidActivation && paidGrant > (refreshedMembership.paid_through_at ?? 0);
+    if (!canonicalSubscription) {
+      await this.rescheduleAlarm();
+      return { duplicate: false };
+    }
     this.ctx.storage.sql.exec(`
       UPDATE keeper_memberships SET stripe_customer_id = ?, current_subscription_id = ?, stripe_status = ?,
         stripe_price_id = ?, billing_interval = ?, cancel_at_period_end = ?,
-        paid_through_at = MAX(COALESCE(paid_through_at, 0), COALESCE(?, 0)), updated_at = ?
+        paid_through_at = CASE
+          WHEN ? IS NULL THEN paid_through_at
+          WHEN paid_through_at IS NULL THEN ?
+          ELSE MAX(paid_through_at, ?)
+        END, updated_at = ?
       WHERE id = ?
     `,
     subscription.customerId, subscription.subscriptionId, subscription.status, subscription.priceId,
-    subscription.interval, subscription.cancelAtPeriodEnd ? 1 : 0, paidThrough, now, membership.id);
+    subscription.interval, subscription.cancelAtPeriodEnd ? 1 : 0,
+    paidGrant, paidGrant, paidGrant, now, membership.id);
 
-    if (input.invoicePaid && paidThrough && paidThrough > now) {
-      this.consecrateKeeper(membership.id, membership.soul_id, paidThrough, now);
-    } else if (membership.activated_at !== null && (!paidThrough || paidThrough <= now)
+    const currentPaidThrough = Math.max(refreshedMembership.paid_through_at ?? 0, paidGrant ?? 0) || null;
+
+    if (provenPaidActivation && currentPaidThrough) {
+      this.consecrateKeeper(membership.id, membership.soul_id, currentPaidThrough, now);
+    } else if (refreshedMembership.activated_at !== null && (!currentPaidThrough || currentPaidThrough <= now)
       && (subscription.status === "canceled" || subscription.status === "unpaid" || subscription.status === "past_due")) {
       this.restKeeper(membership.id, membership.soul_id, now);
     }
+    await this.deliverKeeperUpdate(membership.soul_id);
     await this.rescheduleAlarm();
     return { duplicate: false };
   }
@@ -3276,6 +3497,7 @@ export class PondCoreV2 extends DurableObject<Env> {
       soulId,
     ).one();
     let entity = this.findSoulEntity(soulId);
+    const stateChanged = !entity || entity.lifeKind !== "memorial" || entity.memorialPhase === "dome";
     if (!entity) {
       const lifeId = crypto.randomUUID();
       entity = createSoulFish({
@@ -3326,12 +3548,12 @@ export class PondCoreV2 extends DurableObject<Env> {
         rested_at = NULL, paid_through_at = ?, next_weekly_letter_at = COALESCE(next_weekly_letter_at, ?),
         updated_at = ? WHERE id = ?
     `, entity.lifeId, now, paidThroughAt, now + 7 * GROWTH_DAY_MS, now, membershipId);
-    this.recordSoulEvent(soulId, "keeper_consecrated", now);
+    if (stateChanged) this.recordSoulEvent(soulId, "keeper_consecrated", now);
   }
 
-  private restKeeper(membershipId: string, soulId: string, now: number): void {
+  private restKeeper(membershipId: string, soulId: string, now: number): boolean {
     const entity = this.findSoulEntity(soulId);
-    if (!entity || entity.lifeKind !== "memorial" || !entity.lifeId) return;
+    if (!entity || entity.lifeKind !== "memorial" || !entity.lifeId) return false;
     const sharing = this.sharingSummary(soulId);
     const point = deterministicMemorialPoint(sharing.slug ?? membershipId);
     entity.memorialPhase = "dome";
@@ -3353,6 +3575,7 @@ export class PondCoreV2 extends DurableObject<Env> {
     );
     for (const session of this.sessions.values()) if (session.soulId === soulId) session.entityId = null;
     this.recordSoulEvent(soulId, "keeper_rested", now);
+    return true;
   }
 
   private processKeeperStates(now: number): void {
@@ -3369,7 +3592,9 @@ export class PondCoreV2 extends DurableObject<Env> {
     for (const membership of memberships) {
       const paid = membership.paid_through_at !== null && membership.paid_through_at > now;
       if (!paid && membership.rested_at === null) {
-        this.restKeeper(membership.id, membership.soul_id, now);
+        if (this.restKeeper(membership.id, membership.soul_id, now)) {
+          this.ctx.waitUntil(this.deliverKeeperUpdate(membership.soul_id));
+        }
         continue;
       }
       if (!paid || membership.weekly_letters_enabled !== 1

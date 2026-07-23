@@ -543,7 +543,8 @@
           depth: view.currentDepth,
           heading: view.currentHeading,
           glint: view.glintUntil > client.serverNow(),
-        }, elapsed, view.state.id === ownedEntityId, view.state.id);
+        }, elapsed, view.state.id === ownedEntityId,
+        view.state.state && view.state.state.observerOnly === true ? null : view.state.id);
       }
 
       for (const mesh of this.singleMeshes) {
@@ -708,6 +709,9 @@
       this.eventEffects = new Set();
       this.background = new CodexFishRenderer(LOW_QUALITY ? 360 : 520);
       this.ownedEntityId = null;
+      this.publicObserverId = `local_public_${crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}_${Math.random()}`.replace(/[^a-zA-Z0-9_-]/g, '')}`;
       this.raycaster = new THREE.Raycaster();
       this.pointer = new THREE.Vector2();
       this.worldPoint = new THREE.Vector3();
@@ -895,24 +899,74 @@
 
     applySnapshot(snapshot) {
       const incoming = new Set(snapshot.entities.map((entity) => entity.id));
-      for (const id of this.tracked.keys()) if (!incoming.has(id)) this.remove(id);
-      for (const state of snapshot.entities) this.upsert(state, true);
+      for (const [id, view] of this.tracked) {
+        if (!incoming.has(id) && !(view.state.state && view.state.state.observerOnly === true)) this.remove(id);
+      }
+      for (const state of snapshot.entities) {
+        if (state.id !== this.publicObserverId) this.upsert(state, true);
+      }
       this.backgroundCohorts = snapshot.backgroundCohorts || [];
       this.applyNatureEvents(snapshot.natureEvents || []);
     }
 
     applyDelta(delta) {
-      for (const id of delta.removedIds || []) this.remove(id);
-      for (const id of delta.hiddenIds || []) this.remove(id);
-      for (const state of delta.upserts || []) this.upsert(state, false);
-      for (const motion of delta.motions || []) this.applyMotion(motion);
+      for (const id of delta.removedIds || []) {
+        if (id !== this.publicObserverId) this.remove(id);
+      }
+      for (const id of delta.hiddenIds || []) {
+        if (id !== this.publicObserverId) this.remove(id);
+      }
+      for (const state of delta.upserts || []) {
+        if (state.id !== this.publicObserverId) this.upsert(state, false);
+      }
+      for (const motion of delta.motions || []) {
+        if (motion.id !== this.publicObserverId) this.applyMotion(motion);
+      }
       this.backgroundCohorts = delta.backgroundCohorts || this.backgroundCohorts;
       this.applyNatureEvents(delta.natureEvents || []);
     }
 
     setOwnedEntity(id) {
-      this.ownedEntityId = id;
+      this.ownedEntityId = id === this.publicObserverId ? null : id;
       myFish = null;
+    }
+
+    setPublicObserver(soul) {
+      this.remove(this.publicObserverId);
+      const currentLife = soul && soul.status === 'alive' && soul.currentLife;
+      const presentation = currentLife && currentLife.presentation;
+      if (!presentation) return false;
+      const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+      const tint = Math.max(0, Math.min(0xffffff, Math.trunc(finite(soul.tint, 0x79d1c2))));
+      const name = typeof soul.name === 'string'
+        ? soul.name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)
+        : 'a quiet soul';
+      const eternal = currentLife.kind === 'eternal';
+      this.upsert({
+        id: this.publicObserverId,
+        kind: 'soulFish',
+        soulId: null,
+        lifeId: null,
+        label: name || 'a quiet soul',
+        x: THREE.MathUtils.clamp(finite(presentation.x, 0.5), 0.05, 0.95),
+        z: THREE.MathUtils.clamp(finite(presentation.z, 0.5), 0.05, 0.95),
+        depth: THREE.MathUtils.clamp(finite(presentation.depth, 0), -1, 1),
+        heading: finite(presentation.heading, 0),
+        speed: 0,
+        size: THREE.MathUtils.clamp(finite(presentation.size, 0.72), 0.2, 2.5),
+        tint,
+        ageRatio: THREE.MathUtils.clamp(finite(presentation.ageRatio, 0.5), 0, 1),
+        bornAt: null,
+        endsAt: null,
+        refugeUntil: null,
+        lifeKind: eternal ? 'memorial' : 'mortal',
+        memorialPhase: eternal ? 'water' : null,
+        state: {
+          observerOnly: true,
+          keeperAccent: eternal,
+        },
+      }, true);
+      return true;
     }
 
     syncFish(view, deltaSeconds, elapsed) {
@@ -1281,7 +1335,8 @@
       const candidates = [];
       for (const view of this.tracked.values()) {
         const state = view.state;
-        if (!state.soulId || !state.label) continue;
+        const observerOnly = state.state && state.state.observerOnly === true;
+        if ((!state.soulId && !observerOnly) || !state.label) continue;
         const point = normalizedToWorld(view.currentX, view.currentZ, view.currentDepth).add(new THREE.Vector3(0, 2.8, 0));
         const projected = point.project(camera);
         if (projected.z < -1 || projected.z > 1 || projected.x < -1.1 || projected.x > 1.1 || projected.y < -1.1 || projected.y > 1.1) continue;
@@ -1509,9 +1564,35 @@
   let lastLabelUpdate = 0;
   let lastAudioUpdate = 0;
   let loopErrors = 0;
-  const publicSlug = publicSlugFromPath();
+  let publicSlug = publicSlugFromPath();
+  let observedPublicSoul = null;
   let publicMemorialTracked = false;
   let memorialReturnPending = false;
+
+  function syncPublicObserverFish() {
+    const ownsCanonicalPresentation = !!(observedPublicSoul
+      && client.ownedEntityId
+      && entities.tracked.has(client.ownedEntityId)
+      && client.identity
+      && client.identity.name === observedPublicSoul.name
+      && Number(client.identity.tint) === Number(observedPublicSoul.tint));
+    entities.setPublicObserver(ownsCanonicalPresentation ? null : observedPublicSoul);
+  }
+
+  function clearPublicObservation(resetAnalytics) {
+    observedPublicSoul = null;
+    entities.setPublicObserver(null);
+    ui.setPublicSoul(null);
+    if (resetAnalytics) publicMemorialTracked = false;
+  }
+
+  function syncPublicRoute() {
+    const nextSlug = publicSlugFromPath();
+    if (nextSlug === publicSlug) return;
+    publicSlug = nextSlug;
+    clearPublicObservation(true);
+    if (publicSlug && client.welcomed) client.observePublicSoul(publicSlug);
+  }
 
   function serverOrbitPhase() {
     const elapsed = ((client.serverNow() - orbitEpoch) % orbitPeriod + orbitPeriod) % orbitPeriod;
@@ -1628,6 +1709,7 @@
     orbitPeriod = snapshot.orbit.periodMs;
     entities.applySnapshot(snapshot);
     entities.setOwnedEntity(client.ownedEntityId);
+    syncPublicObserverFish();
     ui.setSnapshot(snapshot);
     ui.setQueue(null);
     queued = false;
@@ -1640,7 +1722,10 @@
     }
   }
 
-  client.on('state', (state) => ui.setConnection(state));
+  client.on('state', (state) => {
+    ui.setConnection(state);
+    if (state === 'closed' || state === 'connecting') clearPublicObservation(false);
+  });
   client.on('message', (message) => {
     if (message.type === 'welcome') {
       ui.setWelcome(message);
@@ -1691,6 +1776,8 @@
       if (message.accepted) ui.setSharing(message.sharing);
       else ui.showNotice('this soul\'s public page could not be changed');
     } else if (message.type === 'publicSoulContext') {
+      observedPublicSoul = message.soul || null;
+      syncPublicObserverFish();
       ui.setPublicSoul(message.soul);
       if (!message.soul) {
         ui.showNotice('this shared soul is resting beyond view');
@@ -1719,6 +1806,7 @@
     } else if (message.type === 'keeperUpdated') {
       ui.setKeeperBusy(false);
       ui.setKeeper(message.keeper);
+      if (message.currentLife !== undefined) ui.setCurrentLife(message.currentLife, client.serverNow());
     } else if (message.type === 'ritualAck' && !message.accepted) {
       if (message.requestId && message.requestId.startsWith('public_ripple_')) ui.setPublicRippleBusy(false);
       if (message.reason === 'cooldown' && message.nextOfferingAt) {
@@ -2183,7 +2271,11 @@
     }
   }
 
-  addEventListener('beforeunload', () => client.dispose());
+  addEventListener('popstate', syncPublicRoute);
+  addEventListener('beforeunload', () => {
+    clearPublicObservation(false);
+    client.dispose();
+  });
   const assetsReadyV2 = Promise.all(Object.entries(ASSETS).map(([key, url]) => loadAsset(key, url)));
   Promise.race([assetsReadyV2, new Promise((resolve) => setTimeout(resolve, 15000))]).then(startRuntime);
 }());

@@ -173,9 +173,8 @@ function keeperPreparationError(request: Request, env: Env, reason: string | und
   }
 }
 
-function publicSoulResponse(view: PublicSoulView): PublicSoulView {
-  const publicView: PublicSoulView = {
-    slug: view.slug,
+function publicSoulResponse(view: PublicSoulView): Omit<PublicSoulView, "slug"> {
+  const publicView: Omit<PublicSoulView, "slug"> = {
     name: view.name,
     tint: view.tint,
     status: view.status,
@@ -201,7 +200,6 @@ function publicSoulResponse(view: PublicSoulView): PublicSoulView {
   }
   if (view.latestMemorial) {
     publicView.latestMemorial = {
-      completedAt: view.latestMemorial.completedAt,
       ageText: view.latestMemorial.ageText,
       rippleAnchor: {
         x: view.latestMemorial.rippleAnchor.x,
@@ -423,10 +421,7 @@ async function handleApiRequest(request: Request, env: Env, url: URL): Promise<R
   if (url.pathname === "/api/v3/links/inspect") return handleLinkRequest(request, env, false);
   if (url.pathname === "/api/v3/links/redeem") return handleLinkRequest(request, env, true);
   if (url.pathname === "/api/v3/credentials/revoke") return handleCredentialRevoke(request, env);
-  if ((url.pathname === "/api/v3/keeper"
-      || url.pathname === "/api/v3/keeper/checkout"
-      || url.pathname === "/api/v3/keeper/portal"
-      || url.pathname === "/api/v3/stripe/webhook")
+  if (url.pathname === "/api/v3/keeper/checkout"
     && String(env.KEEPER_BILLING_ENABLED) !== "true") {
     return errorResponse(request, env, 404, "not_found");
   }

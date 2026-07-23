@@ -55,6 +55,7 @@ export interface HelloMessage extends ClientMessageBase {
   renderer: RendererKind;
   reducedMotion: boolean;
   clientTime: number;
+  visitId?: string;
 }
 
 export interface IncarnateMessage extends ClientMessageBase {
@@ -197,7 +198,6 @@ export interface PublicSoulView {
     };
   };
   latestMemorial?: {
-    completedAt: number;
     ageText: string;
     rippleAnchor: NormalizedPoint;
   };
@@ -440,6 +440,7 @@ export interface KeeperUpdatedMessage {
   type: "keeperUpdated";
   requestId: string;
   keeper: KeeperSummary;
+  currentLife?: CurrentLifeSummary | null;
 }
 
 export interface PresenceMessage {
@@ -523,6 +524,7 @@ export function parseClientMessage(raw: string): ParseResult {
   switch (value.type) {
     case "hello":
       if ((value.token !== undefined && (typeof value.token !== "string" || value.token.length > 256))
+        || (value.visitId !== undefined && (typeof value.visitId !== "string" || !REQUEST_ID_PATTERN.test(value.visitId)))
         || (value.renderer !== "webgl" && value.renderer !== "canvas")
         || typeof value.reducedMotion !== "boolean"
         || !Number.isFinite(value.clientTime)) return { ok: false, error: "invalid_hello" };

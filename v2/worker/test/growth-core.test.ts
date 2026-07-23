@@ -70,6 +70,9 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
       const sql = state.storage.sql;
       sql.exec(`
         DROP TABLE IF EXISTS public_ripple_limits;
+        DROP TABLE IF EXISTS soul_page_visits;
+        DROP TABLE IF EXISTS pond_letter_send_limits;
+        DROP TABLE IF EXISTS email_suppressions;
         DROP TABLE IF EXISTS stripe_webhook_events;
         DROP TABLE IF EXISTS keeper_checkout_attempts;
         DROP TABLE IF EXISTS keeper_subscriptions;
@@ -153,10 +156,45 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
     });
   });
 
+  it("upgrades an already-applied schema v8 world with the v9 visit and delivery safeguards", async () => {
+    const stub = env.POND_CORE.getByName("growth-schema-v8-fixture");
+    await stub.getPublicStatus();
+
+    await runInDurableObject(stub, async (instance: PondCoreV2, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`
+        DROP TABLE IF EXISTS soul_page_visits;
+        DROP TABLE IF EXISTS pond_letter_send_limits;
+        DELETE FROM schema_migrations WHERE version = 9;
+      `);
+
+      const internal = instance as unknown as { installSchema(): void };
+      internal.installSchema();
+      internal.installSchema();
+
+      expect(sql.exec<{ version: number }>(
+        "SELECT MAX(version) AS version FROM schema_migrations",
+      ).one().version).toBe(GROWTH_SCHEMA_VERSION);
+      for (const table of ["soul_page_visits", "pond_letter_send_limits"]) {
+        expect(sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?",
+          table,
+        ).one().count).toBe(1);
+      }
+      expect(sql.exec<{ name: string }>("PRAGMA table_info(resend_webhook_events)")
+        .toArray().map((column) => column.name)).toContain("event_created_at");
+      expect(sql.exec<{ name: string }>("PRAGMA table_info(keeper_checkout_attempts)")
+        .toArray().map((column) => column.name)).toContain("customer_id");
+      expect(sql.exec<{ name: string }>("PRAGMA table_info(email_deliveries)")
+        .toArray().map((column) => column.name)).toEqual(expect.arrayContaining(["email_hash", "consent_version"]));
+    });
+  });
+
   it("records one authenticated visit per soul and UTC day even with extra tabs", async () => {
     const stub = env.POND_CORE.getByName("growth-daily-visits");
     const first = await stub.connectSoul({
       requestId: "visit_first_tab",
+      visitId: "visit_page_first_tab",
       renderer: "canvas",
       reducedMotion: true,
       gatewayShard: 0,
@@ -165,6 +203,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
     expect(token).toBeTruthy();
     const second = await stub.connectSoul({
       requestId: "visit_second_tab",
+      visitId: "visit_page_second_tab",
       token,
       renderer: "canvas",
       reducedMotion: true,
@@ -172,6 +211,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
     });
     const third = await stub.connectSoul({
       requestId: "visit_third_tab",
+      visitId: "visit_page_third_tab",
       token,
       renderer: "webgl",
       reducedMotion: false,
@@ -382,7 +422,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
     const view = await stub.getPublicSoul({ slug: slug ?? "missing" });
     expect(view).not.toBeNull();
     expect(Object.keys(view ?? {}).sort()).toEqual([
-      "completedLives", "currentLife", "name", "slug", "status", "tint",
+      "completedLives", "currentLife", "dedication", "name", "slug", "status", "tint",
     ]);
     expect(Object.keys(view?.currentLife ?? {}).sort()).toEqual([
       "ageText", "kind", "presentation", "remainingPassageText",
@@ -517,6 +557,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
       objectId: "in_keeper_paid_initial",
       createdAt: now,
       invoicePaid: true,
+      paidInvoiceThroughAt: now + 30 * DAY_MS,
       subscription: {
         subscriptionId,
         membershipRef: membershipId,
@@ -526,7 +567,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
         interval: "month",
         quantity: 1,
         cancelAtPeriodEnd: false,
-        paidThroughAt: now + 30 * DAY_MS,
+        paidThroughAt: null,
       },
     };
     expect(await stub.applyStripeEvent(activeEvent)).toEqual({ duplicate: false });
@@ -570,7 +611,7 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
       subscription: {
         ...activeEvent.subscription!,
         status: "canceled",
-        paidThroughAt: expiredAt,
+        paidThroughAt: null,
       },
     };
     expect(await stub.applyStripeEvent(restEvent)).toEqual({ duplicate: false });
@@ -590,9 +631,9 @@ describe("Eternal Pond growth schema and relationship invariants", () => {
       objectId: "in_keeper_paid_again",
       createdAt: now + 2,
       invoicePaid: true,
+      paidInvoiceThroughAt: now + 60 * DAY_MS,
       subscription: {
         ...activeEvent.subscription!,
-        paidThroughAt: now + 60 * DAY_MS,
       },
     };
     expect(await stub.applyStripeEvent(reactivateEvent)).toEqual({ duplicate: false });

@@ -5,6 +5,7 @@ const billingMocks = vi.hoisted(() => ({
   createKeeperCheckout: vi.fn(),
   createKeeperPortal: vi.fn(),
   keeperBillingConfigured: vi.fn(),
+  keeperPortalConfigured: vi.fn(),
   reconcileStripeEvent: vi.fn(),
   retrieveKeeperCheckout: vi.fn(),
   verifyStripeWebhook: vi.fn(),
@@ -50,6 +51,7 @@ function ownerHeaders(): HeadersInit {
 beforeEach(() => {
   vi.clearAllMocks();
   billingMocks.keeperBillingConfigured.mockReturnValue(false);
+  billingMocks.keeperPortalConfigured.mockReturnValue(false);
 });
 
 describe("Eternal Pond HTTP API boundary", () => {
@@ -78,6 +80,20 @@ describe("Eternal Pond HTTP API boundary", () => {
       tint: 123,
       status: "alive",
       completedLives: 2,
+      currentLife: {
+        kind: "mortal",
+        ageText: "in the first quiet days",
+        remainingPassageText: "with several dawns still ahead",
+        presentation: { x: 0.4, z: 0.6, depth: -0.08, heading: 1.2, size: 0.7, ageRatio: 0.2 },
+        lifeId: "internal_life_must_not_escape",
+        entityId: "internal_entity_must_not_escape",
+      },
+      latestMemorial: {
+        ageText: "remembered after seven dawns",
+        rippleAnchor: { x: 0.2, z: 0.8 },
+        completedAt: 1_800_000_000_000,
+        memoryId: "internal_memory_must_not_escape",
+      },
       soulId: "internal_soul_must_not_escape",
       email: "quiet@example.com",
     };
@@ -88,11 +104,20 @@ describe("Eternal Pond HTTP API boundary", () => {
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      slug: "quiet-thistle-under-glass",
       name: "Quiet Thistle under Glass",
       tint: 123,
       status: "alive",
       completedLives: 2,
+      currentLife: {
+        kind: "mortal",
+        ageText: "in the first quiet days",
+        remainingPassageText: "with several dawns still ahead",
+        presentation: { x: 0.4, z: 0.6, depth: -0.08, heading: 1.2, size: 0.7, ageRatio: 0.2 },
+      },
+      latestMemorial: {
+        ageText: "remembered after seven dawns",
+        rippleAnchor: { x: 0.2, z: 0.8 },
+      },
     });
     expect(core.getPublicSoul).toHaveBeenCalledWith({ slug: "quiet-thistle-under-glass" });
 
@@ -228,7 +253,7 @@ describe("Eternal Pond HTTP API boundary", () => {
       method: "POST",
       headers: ownerHeaders(),
       body: JSON.stringify({ interval: "month", priceId: "price_attacker" }),
-    }), apiEnv(core));
+    }), apiEnv(core, { KEEPER_BILLING_ENABLED: "true" }));
     expect(forged.status).toBe(400);
     expect(billingMocks.createKeeperCheckout).not.toHaveBeenCalled();
 
@@ -236,7 +261,7 @@ describe("Eternal Pond HTTP API boundary", () => {
       method: "POST",
       headers: ownerHeaders(),
       body: JSON.stringify({ interval: "month" }),
-    }), apiEnv(core));
+    }), apiEnv(core, { KEEPER_BILLING_ENABLED: "true" }));
 
     expect(response.status).toBe(200);
     expect(billingMocks.createKeeperCheckout).toHaveBeenCalledWith(expect.anything(), {
@@ -254,6 +279,7 @@ describe("Eternal Pond HTTP API boundary", () => {
 
   it("creates a Keeper portal only for the canonical customer", async () => {
     billingMocks.keeperBillingConfigured.mockReturnValue(true);
+    billingMocks.keeperPortalConfigured.mockReturnValue(true);
     billingMocks.createKeeperPortal.mockResolvedValue({ url: "https://billing.stripe.test/safe" });
     const core = {
       prepareKeeperPortal: vi.fn().mockResolvedValue({ ok: true, customerId: "cus_canonical" }),

@@ -85,14 +85,8 @@ function expandableId(value: string | { id: string } | null | undefined): string
   return value?.id ?? null;
 }
 
-function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
-  const ends = subscription.items.data
-    .map((item) => item.current_period_end)
-    .filter((value): value is number => Number.isFinite(value));
-  return ends.length > 0 ? Math.max(...ends) * 1000 : null;
-}
-
 export function normalizeStripeSubscription(subscription: Stripe.Subscription): NormalizedStripeSubscription | null {
+  if (subscription.items.data.length !== 1) return null;
   const item = subscription.items.data[0];
   const membershipRef = subscription.metadata.pond_keeper_ref;
   const customerId = expandableId(subscription.customer);
@@ -107,8 +101,27 @@ export function normalizeStripeSubscription(subscription: Stripe.Subscription): 
     interval: interval === "month" || interval === "year" ? interval : null,
     quantity: item.quantity ?? 0,
     cancelAtPeriodEnd: subscription.cancel_at_period_end,
-    paidThroughAt: subscriptionPeriodEnd(subscription),
+    paidThroughAt: null,
   };
+}
+
+function paidInvoiceThroughAt(env: Env, invoice: Stripe.Invoice, subscriptionId: string): number | null {
+  if (invoice.status !== "paid") return null;
+  const allowedPrices = new Set<string>(
+    [String(env.STRIPE_MONTHLY_PRICE_ID), String(env.STRIPE_ANNUAL_PRICE_ID)].filter(Boolean),
+  );
+  const matchingLines = invoice.lines.data.filter((line) => {
+    const details = line.parent?.subscription_item_details;
+    const lineSubscriptionId = details?.subscription ?? null;
+    const priceId = expandableId(line.pricing?.price_details?.price);
+    return lineSubscriptionId === subscriptionId
+      && details?.proration === false
+      && priceId !== null
+      && allowedPrices.has(priceId)
+      && line.quantity === 1
+      && Number.isFinite(line.period.end);
+  });
+  return matchingLines.length === 1 ? matchingLines[0]!.period.end * 1000 : null;
 }
 
 function subscriptionIdFromEvent(event: Stripe.Event): string | null {
@@ -144,12 +157,18 @@ export async function reconcileStripeEvent(env: Env, event: Stripe.Event): Promi
       };
     }
   }
-  normalized.invoicePaid = event.type === "invoice.paid";
+  const invoice = event.type === "invoice.paid" || event.type === "invoice.payment_failed"
+    ? event.data.object as Stripe.Invoice
+    : null;
+  normalized.invoicePaid = event.type === "invoice.paid" && invoice?.status === "paid";
   normalized.invoiceFailed = event.type === "invoice.payment_failed";
   const subscriptionId = subscriptionIdFromEvent(event);
   if (subscriptionId) {
     const subscription = await retrieveStripeSubscription(env, subscriptionId);
     normalized.subscription = normalizeStripeSubscription(subscription) ?? undefined;
+    if (normalized.invoicePaid && normalized.subscription && invoice) {
+      normalized.paidInvoiceThroughAt = paidInvoiceThroughAt(env, invoice, subscriptionId);
+    }
   }
   return normalized;
 }
