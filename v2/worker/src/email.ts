@@ -18,8 +18,9 @@ export function emailConfigured(env: Env): boolean {
 }
 
 export async function sendPondEmail(env: Env, message: PondEmail): Promise<PondEmailResult> {
-  if (!emailConfigured(env)) throw new Error("pond_email_not_configured");
-  const resend = new Resend(env.RESEND_API_KEY);
+  const apiKey = env.RESEND_API_KEY;
+  if (!emailConfigured(env) || !apiKey) throw new Error("pond_email_not_configured");
+  const resend = new Resend(apiKey);
   const result = await resend.emails.send({
     from: env.RESEND_FROM,
     to: message.to,
@@ -50,4 +51,3 @@ export function escapeHtml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
-

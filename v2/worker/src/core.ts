@@ -1454,7 +1454,18 @@ export class PondCoreV2 extends DurableObject<Env> {
 
     let confirmationSent = false;
     if (requestedEmail !== null) {
-      const emailHash = await keyedEmailHash(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
+      const encryptionKey = this.env.EMAIL_ENCRYPTION_KEY;
+      if (!encryptionKey) {
+        return {
+          v: PROTOCOL_VERSION,
+          type: "pondLetterAck",
+          requestId: message.requestId,
+          accepted: false,
+          preference: this.letterPreferenceSummary(session.soulId),
+          reason: "not_configured",
+        };
+      }
+      const emailHash = await keyedEmailHash(requestedEmail, encryptionKey);
       const latest = this.letterPreferenceRow(session.soulId);
       const sameConfirmedEmail = latest?.email_hash === emailHash && latest.status === "confirmed";
       const samePendingEmail = latest?.email_hash === emailHash && latest.status === "pending";
@@ -1507,7 +1518,7 @@ export class PondCoreV2 extends DurableObject<Env> {
             reason: "rate_limited",
           };
         }
-        const encrypted = await encryptText(requestedEmail, this.env.EMAIL_ENCRYPTION_KEY);
+        const encrypted = await encryptText(requestedEmail, encryptionKey);
         const beforeWrite = this.letterPreferenceRow(session.soulId);
         if (latest && (!beforeWrite
           || beforeWrite.consent_version !== latest.consent_version
@@ -1769,6 +1780,8 @@ export class PondCoreV2 extends DurableObject<Env> {
   }
 
   private async sendEmailDelivery(deliveryId: string, existingPrimaryClaim?: string): Promise<boolean> {
+    const encryptionKey = this.env.EMAIL_ENCRYPTION_KEY;
+    if (!emailConfigured(this.env) || !encryptionKey) return false;
     const row = this.ctx.storage.sql.exec<EmailDeliveryRow>(
       "SELECT * FROM email_deliveries WHERE id = ?",
       deliveryId,
@@ -1822,7 +1835,7 @@ export class PondCoreV2 extends DurableObject<Env> {
         ciphertext: preference.email_ciphertext,
         iv: preference.email_iv,
         version: 1,
-      }, this.env.EMAIL_ENCRYPTION_KEY);
+      }, encryptionKey);
       const soul = this.ctx.storage.sql.exec<{ poetic_name: string }>(
         "SELECT poetic_name FROM souls WHERE id = ?",
         row.soul_id,

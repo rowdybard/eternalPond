@@ -4,7 +4,9 @@ import type { NormalizedStripeEvent, NormalizedStripeSubscription } from "./grow
 export type KeeperInterval = "month" | "year";
 
 function stripeClient(env: Env): Stripe {
-  return new Stripe(env.STRIPE_SECRET_KEY, {
+  const secretKey = env.STRIPE_SECRET_KEY;
+  if (!secretKey) throw new Error("keeper_billing_not_configured");
+  return new Stripe(secretKey, {
     apiVersion: "2026-06-24.dahlia",
     httpClient: Stripe.createFetchHttpClient(),
   });

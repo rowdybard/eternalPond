@@ -26,16 +26,6 @@
     "STRIPE_ANNUAL_PRICE_ID": "",
     "STRIPE_PORTAL_CONFIGURATION_ID": ""
   },
-  "secrets": {
-    "required": [
-      "RESEND_API_KEY",
-      "RESEND_WEBHOOK_SECRET",
-      "EMAIL_ENCRYPTION_KEY",
-      "STRIPE_SECRET_KEY",
-      "STRIPE_WEBHOOK_SECRET",
-      "ANALYTICS_BEARER_TOKEN"
-    ]
-  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
