@@ -6,6 +6,8 @@
   const BACKGROUND_FISH_CAP = LOW_QUALITY ? 160 : 260;
   const reducedMotionKey = 'eternalpond.reduced-motion.v2';
   const mutedKey = 'pond_muted';
+  const localVisual = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+    ? new URLSearchParams(location.search).get('visual') : null;
 
   function publicSlugFromPath() {
     const match = location.pathname.match(/^\/s\/([^/]+)\/?$/);
@@ -378,31 +380,73 @@
       this.pointer = new THREE.Vector2();
       this.indexToId = [];
 
-      const bodyGeometry = new THREE.SphereGeometry(1, LOW_QUALITY ? 8 : 11, LOW_QUALITY ? 5 : 7);
-      const bodyMaterial = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        toneMapped: false,
-      });
+      const bodyGeometry = new THREE.SphereGeometry(1, LOW_QUALITY ? 16 : 24, LOW_QUALITY ? 10 : 14);
+      const bodyPosition = bodyGeometry.attributes.position;
+      for (let vertex = 0; vertex < bodyPosition.count; vertex++) {
+        const x = bodyPosition.getX(vertex);
+        const taper = 0.71 + (x + 1) * 0.145;
+        bodyPosition.setY(vertex, bodyPosition.getY(vertex) * taper);
+        bodyPosition.setZ(vertex, bodyPosition.getZ(vertex) * taper);
+      }
+      bodyGeometry.computeVertexNormals();
+      const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.28, metalness: 0.16 });
+      bodyMaterial.onBeforeCompile = (shader) => {
+        shader.vertexShader = 'varying vec3 vFishSkin; varying vec2 vFishUv;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vFishSkin = position; vFishUv = uv;');
+        shader.fragmentShader = 'varying vec3 vFishSkin; varying vec2 vFishUv;\n' + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
+          #include <color_fragment>
+          vec2 scales = vFishUv * vec2(44.0, 24.0);
+          scales.x += mod(floor(scales.y), 2.0) * 0.5;
+          vec2 scaleCell = fract(scales) - vec2(0.5, 0.40);
+          float scaleEdge = smoothstep(0.32, 0.49, length(scaleCell * vec2(1.0, 0.82)));
+          float belly = 1.0 - smoothstep(-0.60, 0.04, vFishSkin.y);
+          diffuseColor.rgb *= mix(vec3(0.56, 0.64, 0.63), vec3(1.08), belly);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.72, 0.73, 0.61), belly * 0.32);
+          diffuseColor.rgb *= 0.90 + (1.0 - scaleEdge) * 0.16;
+          float gill = exp(-pow((vFishSkin.x - 0.56) * 27.0, 2.0)) * smoothstep(0.12, 0.45, abs(vFishSkin.z));
+          diffuseColor.rgb *= 1.0 - gill * 0.36;
+        `);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance += diffuseColor.rgb * 0.22;');
+      };
+      bodyMaterial.customProgramCacheKey = () => 'pond-fish-scales-v1';
       this.bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, capacity);
 
-      const tailGeometry = new THREE.ConeGeometry(0.62, 1.2, 4);
-      tailGeometry.rotateZ(-Math.PI / 2);
-      const tailMaterial = new THREE.MeshBasicMaterial({
+      const tailShape = new THREE.Shape();
+      tailShape.moveTo(0.48, 0);
+      tailShape.quadraticCurveTo(0.06, -0.22, -0.58, -0.79);
+      tailShape.lineTo(-0.33, -0.22);
+      tailShape.lineTo(-0.13, 0);
+      tailShape.lineTo(-0.33, 0.22);
+      tailShape.lineTo(-0.58, 0.79);
+      tailShape.quadraticCurveTo(0.06, 0.22, 0.48, 0);
+      const tailGeometry = new THREE.ExtrudeGeometry(tailShape, { depth: 0.055, bevelEnabled: false, curveSegments: 6 });
+      tailGeometry.translate(0, 0, -0.0275);
+      const tailMaterial = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         side: THREE.DoubleSide,
-        toneMapped: false,
+        roughness: 0.46,
+        metalness: 0.06,
       });
+      addUnderwaterFillRuntime(tailMaterial, 0.20);
       this.tails = new THREE.InstancedMesh(tailGeometry, tailMaterial, capacity);
 
-      const finGeometry = new THREE.ConeGeometry(0.42, 0.9, 3);
-      const finMaterial = new THREE.MeshBasicMaterial({
+      const finShape = new THREE.Shape();
+      finShape.moveTo(-0.42, -0.42);
+      finShape.quadraticCurveTo(-0.31, 0.22, -0.09, 0.49);
+      finShape.quadraticCurveTo(0.13, 0.44, 0.36, -0.29);
+      finShape.quadraticCurveTo(0.12, -0.43, -0.42, -0.42);
+      const finGeometry = new THREE.ShapeGeometry(finShape, 8);
+      const finMaterial = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         side: THREE.DoubleSide,
-        toneMapped: false,
+        roughness: 0.43,
+        metalness: 0.08,
       });
+      addUnderwaterFillRuntime(finMaterial, 0.20);
       this.fins = new THREE.InstancedMesh(finGeometry, finMaterial, capacity);
 
-      const sideFinGeometry = new THREE.ConeGeometry(0.34, 0.95, 3);
+      const sideFinGeometry = finGeometry.clone().scale(0.80, 1, 1);
       sideFinGeometry.rotateX(Math.PI / 2);
       this.sideFins = new THREE.InstancedMesh(sideFinGeometry, finMaterial, capacity * 2);
 
@@ -700,6 +744,86 @@
     }
   }
 
+  // A fixed instanced pool for server-owned fish activity. Surface cues reuse
+  // geometry and buffers, and never add disturbances to Fable's water shader.
+  class CanonicalSurfaceRingPool {
+    constructor(capacity) {
+      this.capacity = capacity;
+      this.head = 0;
+      this.startedAt = new Float64Array(capacity).fill(-Infinity);
+      this.x = new Float32Array(capacity);
+      this.z = new Float32Array(capacity);
+      this.radius = new Float32Array(capacity);
+      this.opacity = new Float32Array(capacity);
+      this.alpha = new Float32Array(capacity);
+      this.matrix = new THREE.Matrix4();
+      const geometry = new THREE.RingGeometry(0.82, 1, LOW_QUALITY ? 24 : 36).rotateX(-Math.PI / 2);
+      geometry.setAttribute('aRingAlpha', new THREE.InstancedBufferAttribute(this.alpha, 1).setUsage(THREE.DynamicDrawUsage));
+      const material = new THREE.ShaderMaterial({
+        uniforms: { uFoam: waterUniforms.uFoam, uFog: waterUniforms.uFog, uFogDensity: waterUniforms.uFogDensity },
+        transparent: true, depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+        vertexShader: `
+          attribute float aRingAlpha;
+          varying float vAlpha; varying float vRadius; varying vec3 vWorld;
+          void main() {
+            vAlpha = aRingAlpha; vRadius = length(position.xz);
+            vec4 world = modelMatrix * instanceMatrix * vec4(position, 1.0);
+            vWorld = world.xyz;
+            gl_Position = projectionMatrix * viewMatrix * world;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uFoam; uniform vec3 uFog; uniform float uFogDensity;
+          varying float vAlpha; varying float vRadius; varying vec3 vWorld;
+          void main() {
+            float edge = smoothstep(0.82, 0.89, vRadius) * (1.0 - smoothstep(0.93, 1.0, vRadius));
+            float distanceToEye = length(cameraPosition - vWorld);
+            float fog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToEye * distanceToEye);
+            gl_FragColor = vec4(mix(uFoam, uFog, fog), vAlpha * edge);
+          }
+        `,
+      });
+      this.mesh = new THREE.InstancedMesh(geometry, material, capacity);
+      this.mesh.name = 'canonical-fish-surface-rings';
+      this.mesh.count = 0;
+      this.mesh.frustumCulled = false;
+      this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.mesh.renderOrder = 4;
+      scene.add(this.mesh);
+    }
+
+    emit(view, now, food) {
+      const index = this.head;
+      this.head = (index + 1) % this.capacity;
+      this.startedAt[index] = now;
+      this.x[index] = toWorldX(view.currentX * W);
+      this.z[index] = toWorldZ(view.currentZ * H);
+      this.radius[index] = 4.8 + Math.min(1.5, view.state.size) * 2.3;
+      this.opacity[index] = food ? 0.26 : 0.22;
+    }
+
+    update(now, still) {
+      let count = 0;
+      for (let index = 0; index < this.capacity; index++) {
+        const age = (now - this.startedAt[index]) / 2300;
+        if (age < 0 || age >= 1) continue;
+        if (still) { this.startedAt[index] = -Infinity; continue; }
+        const radius = 0.75 + this.radius[index] * age;
+        const y = sampleWaterHeight(this.x[index], this.z[index], waterUniforms.uTime.value) + 0.08;
+        this.matrix.makeScale(radius, 1, radius);
+        this.matrix.setPosition(this.x[index], y, this.z[index]);
+        this.mesh.setMatrixAt(count, this.matrix);
+        this.alpha[count] = Math.sin(Math.min(1, age * 7) * Math.PI / 2) * (1 - age) * this.opacity[index];
+        count++;
+      }
+      this.mesh.count = count;
+      if (count) {
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.mesh.geometry.attributes.aRingAlpha.needsUpdate = true;
+      }
+    }
+  }
+
   class CanonicalEntityLayer {
     constructor() {
       this.tracked = new Map();
@@ -707,6 +831,9 @@
       this.natureEvents = new Map();
       this.eventVisuals = new Map();
       this.eventEffects = new Set();
+      this.surfaceCues = new Map();
+      this.surfaceRings = new CanonicalSurfaceRingPool(LOW_QUALITY ? 16 : 28);
+      this.nextSurfaceCueAt = 0;
       this.background = new CodexFishRenderer(LOW_QUALITY ? 360 : 520);
       this.ownedEntityId = null;
       this.publicObserverId = `local_public_${crypto.randomUUID
@@ -802,6 +929,11 @@
           tongue,
           tongueTip,
           baseScale: 5.4,
+          phase: hashString(state.id) * 0.001,
+          lastStroke: -1,
+          wasHopping: false,
+          landedAt: -10,
+          tongueUp: new THREE.Vector3(0, 1, 0),
           feedEvent: null,
         };
       }
@@ -1049,17 +1181,31 @@
       const worldZ = toWorldZ(frogZ * H);
       const radius = Math.hypot(worldX, worldZ);
       const mode = runtime.mode || 'floating';
+      const aquatic = mode === 'swimming' || mode === 'floating';
+      const phase = frog.phase;
+      const motionTime = reducedMotion ? 0 : elapsed;
+      const breath = Math.sin(motionTime * 2.05 + phase) * 0.016;
+      const strokeTime = motionTime * (mode === 'swimming' ? 2.7 : 1.32) + phase;
+      const stroke = Math.max(0, Math.sin(strokeTime));
       const surface = sampleWaterHeight(worldX, worldZ, waterUniforms.uTime.value);
-      let height = surface + 0.38;
-      if (mode === 'swimming') height = surface - 0.05;
-      else if (mode === 'shore' || mode === 'ground') height = terrainHeight(radius) + 0.65;
-      else if (mode === 'lily') height = surface + 0.5;
+      const footClearance = frog.baseScale * growth * 0.2;
+      let height = surface + 0.1;
+      if (mode === 'swimming') height = surface - 0.14;
+      else if (mode === 'shore' || mode === 'ground') height = terrainHeight(radius) + footClearance;
+      else if (mode === 'lily') height = surface + footClearance + 0.16;
       const transitionStart = runtime.transitionStartedAt || 0;
       const transitionEnd = runtime.transitionEndsAt || 0;
       const transitionProgress = transitionEnd > transitionStart
         ? THREE.MathUtils.clamp((client.serverNow() - transitionStart) / (transitionEnd - transitionStart), 0, 1)
         : 1;
-      const hop = transitionProgress < 1 ? Math.sin(transitionProgress * Math.PI) * (mode === 'ground' ? 5.2 : 2.8) : 0;
+      const hopping = transitionProgress < 1 && mode !== 'swimming';
+      const hop = hopping ? Math.sin(transitionProgress * Math.PI) * (mode === 'ground' ? 5.2 : 2.8) : 0;
+      if (frog.wasHopping && !hopping) {
+        frog.landedAt = elapsed;
+        if (aquatic || mode === 'lily') addRipple(frogX * W, frogZ * H, { maxRadius: 24 * growth, speed: 0.65, opacity: 0.19 });
+      }
+      frog.wasHopping = hopping;
+      const landing = Math.max(0, 1 - (elapsed - frog.landedAt) / 0.48);
       const feedEvent = this.activeNature('frog_feed', state.id);
       const callEvent = this.activeNature('frog_call', state.id);
       const feedProgress = feedEvent
@@ -1069,19 +1215,54 @@
         ? Math.sin((feedProgress - 0.67) * Math.PI * 15) * (1 - (feedProgress - 0.67) / 0.27)
         : 0;
       const callPulse = callEvent ? Math.max(0, Math.sin((client.serverNow() - callEvent.startsAt) * 0.012)) * 0.055 : 0;
-      const pulse = 1 + (feedEvent ? Math.max(0, chew) * 0.045 : 0) + callPulse;
-      frog.mesh.position.set(worldX, height + hop, worldZ);
-      frog.mesh.rotation.y = -view.currentHeading;
-      frog.mesh.scale.setScalar(frog.baseScale * growth * pulse);
-      frog.shadow.position.set(worldX, Math.max(0.07, terrainHeight(radius) + 0.08), worldZ);
+      const pulse = 1 + (feedEvent ? Math.max(0, chew) * 0.022 : 0);
+      frog.mesh.position.set(worldX, height + hop + (aquatic ? Math.sin(strokeTime - 0.4) * 0.045 : 0), worldZ);
+      frog.mesh.rotation.set(aquatic ? Math.sin(strokeTime * 0.5) * 0.025 : 0, -view.currentHeading,
+        hopping ? Math.cos(transitionProgress * Math.PI) * 0.2 : aquatic ? -0.045 + stroke * 0.018 : 0);
+      frog.mesh.scale.set(frog.baseScale * growth * pulse * (1 + landing * 0.045), frog.baseScale * growth * pulse * (1 - landing * 0.1), frog.baseScale * growth * pulse);
+      frog.shadow.position.set(worldX, aquatic || mode === 'lily' ? surface + 0.035 : terrainHeight(radius) + 0.06, worldZ);
       frog.shadow.scale.setScalar(frog.baseScale * growth * (1.05 - Math.min(0.6, hop * 0.06)));
-      frog.shadow.material.opacity = mode === 'swimming' ? 0.08 : 0.2 * (1 - Math.min(0.75, hop * 0.08));
+      frog.shadow.material.opacity = aquatic ? 0.075 : 0.2 * (1 - Math.min(0.75, hop * 0.08));
 
       const rig = frog.model.userData;
-      if (rig.lowerJaw) rig.lowerJaw.rotation.z = feedEvent ? -Math.sin(Math.min(1, feedProgress / 0.2) * Math.PI) * 0.16 - Math.max(0, chew) * 0.08 : 0;
+      if (rig.body) rig.body.scale.set(1 + breath * 0.18, 1 + breath, 1 + breath * 0.55);
+      if (rig.throat) rig.throat.scale.set(1 + breath * 0.5, 1 + breath * 2 + callPulse * 7 + Math.max(0, chew) * 0.22, 1 + callPulse * 2);
+      if (rig.lowerJaw) rig.lowerJaw.rotation.z = feedEvent ? -Math.sin(Math.min(1, feedProgress / 0.72) * Math.PI) * 0.24 - Math.max(0, chew) * 0.12 : -callPulse * 0.75;
       if (rig.eyeGroups) {
-        const blink = feedEvent && feedProgress > 0.72 && feedProgress < 0.82 ? 0.12 : 1;
+        const blinkClock = (motionTime + phase) % 6.7;
+        const idleBlink = blinkClock < 0.19 ? 1 - Math.sin(blinkClock / 0.19 * Math.PI) * 0.9 : 1;
+        const blink = feedEvent && feedProgress > 0.72 && feedProgress < 0.82 ? 0.15 : idleBlink;
         for (const eye of rig.eyeGroups) eye.scale.y = blink;
+      }
+      if (rig.pupils) {
+        for (let i = 0; i < rig.pupils.length; i++) {
+          const pupil = rig.pupils[i];
+          pupil.position.y = 0.115 + (feedEvent ? 0.035 : Math.sin(motionTime * 0.46 + phase) * 0.014);
+          pupil.position.z = (i === 0 ? -0.03 : 0.03) + Math.sin(motionTime * 0.63 + phase) * 0.025;
+        }
+      }
+      if (rig.hindLegs) {
+        const extension = hopping ? Math.sin(transitionProgress * Math.PI) : aquatic ? stroke * (mode === 'swimming' ? 1 : 0.48) : 0;
+        for (const leg of rig.hindLegs) {
+          leg.pivot.rotation.y = leg.side * (-extension * 0.72);
+          leg.pivot.rotation.z = -extension * 0.16;
+          leg.ankle.rotation.y = leg.side * extension * 0.62;
+          leg.ankle.rotation.z = extension * 0.3;
+          leg.ankle.position.x = 0.44 - extension * 0.48;
+        }
+      }
+      if (rig.foreLegs) {
+        for (const leg of rig.foreLegs) {
+          leg.pivot.rotation.y = aquatic ? leg.side * (0.1 + Math.sin(strokeTime + leg.side * 0.65) * 0.17) : 0;
+          leg.pivot.rotation.z = hopping ? -Math.sin(transitionProgress * Math.PI) * 0.36 : aquatic ? 0.15 + stroke * 0.12 : landing * 0.12;
+        }
+      }
+      // One small contact ring per full paddle cycle; no shader disturbance or
+      // per-frame wake particles. These are cosmetic, never ecology mutations.
+      const strokeIndex = Math.floor(strokeTime / TAU);
+      if (!reducedMotion && aquatic && !hopping && frog.lastStroke !== strokeIndex) {
+        if (frog.lastStroke >= 0) addRipple(frogX * W, frogZ * H, { maxRadius: 14 + growth * 5, speed: 0.45, opacity: 0.09 });
+        frog.lastStroke = strokeIndex;
       }
       frog.mesh.updateMatrixWorld(true);
 
@@ -1115,7 +1296,7 @@
           frog.tongue.visible = true;
           frog.tongueTip.visible = true;
           frog.tongue.position.copy(this.worldPoint).lerp(tip, 0.5);
-          frog.tongue.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), this.worldPointB.copy(tip).sub(this.worldPoint).normalize());
+          frog.tongue.quaternion.setFromUnitVectors(frog.tongueUp, this.worldPointB.copy(tip).sub(this.worldPoint).normalize());
           frog.tongue.scale.set(growth, Math.max(0.01, length), growth);
           frog.tongueTip.position.copy(tip);
           frog.tongueTip.scale.setScalar(growth);
@@ -1125,11 +1306,12 @@
 
     syncBird(view, deltaSeconds, elapsed) {
       const bird = view.bird;
+      const inspecting = localVisual === 'birds' && view === [...this.tracked.values()].find(item => item.bird);
       const now = client.serverNow();
       const worldSeconds = now / 1000;
       const birdScale = 3.8 + view.state.size * 1.2;
       const runtime = view.state.state || {};
-      const mode = runtime.mode || 'circling';
+      const mode = inspecting ? 'circling' : runtime.mode || 'circling';
       let x = toWorldX(view.currentX * W);
       let z = toWorldZ(view.currentZ * H);
       const flightHeight = 17.5 + (bird.perchIndex % 3) * 1.25;
@@ -1226,15 +1408,26 @@
         flap = Math.sin(worldSeconds * 12 + bird.phase) * 0.82;
       }
 
+      if (inspecting) { x = 0; z = 0; height = 3.4; heading = 0.4; pitch = 0; bank = 0; }
       bird.mesh.position.set(x, height, z);
       bird.mesh.rotation.set(pitch, -heading, bank);
       bird.mesh.scale.setScalar(birdScale);
       if (bird.mixer) bird.mixer.update(reducedMotion ? 0 : deltaSeconds);
       else if (bird.model.userData.wings) {
+        const resting = !hunt && (mode === 'perched' || mode === 'foraging');
         for (const wing of bird.model.userData.wings) {
-          wing.pivot.rotation.x = flap * wing.side;
-          wing.pivot.rotation.z = 0;
+          wing.pivot.rotation.x = resting ? wing.side * 1.16 : flap * wing.side;
+          wing.pivot.rotation.y = resting ? wing.side * 0.42 : -wing.side * 0.10;
+          wing.pivot.rotation.z = resting ? -0.10 : flap * 0.08;
+          if (wing.outer) {
+            wing.outer.rotation.y = wing.side * (resting ? 1.08 : 0.18 + Math.max(0, flap) * 0.34);
+            wing.outer.rotation.x = resting ? wing.side * 0.20 : -flap * wing.side * 0.26;
+          }
         }
+        const rig = bird.model.userData;
+        if (rig.head) rig.head.rotation.y = reducedMotion ? 0 : Math.sin(worldSeconds * 1.45 + bird.phase) * (resting ? 0.23 : 0.04);
+        if (rig.tail) rig.tail.rotation.y = reducedMotion ? 0 : bank * 0.30;
+        if (rig.legs) for (const leg of rig.legs) leg.pivot.rotation.z = resting ? 0 : -0.8;
       }
       bird.shadow.visible = mode !== 'perched' || !!hunt;
       if (bird.shadow.visible) {
@@ -1505,7 +1698,7 @@
 
     update(deltaSeconds, now) {
       if (this.mode === 'free') {
-        if (!reducedMotion && !controls.autoRotate && now - lastInteract > 6000) controls.autoRotate = true;
+        if (!localVisual && !reducedMotion && !controls.autoRotate && now - lastInteract > 6000) controls.autoRotate = true;
         controls.update();
         return;
       }
@@ -1564,6 +1757,7 @@
   let lastLabelUpdate = 0;
   let lastAudioUpdate = 0;
   let loopErrors = 0;
+  let sceneReedGust = false;
   let publicSlug = publicSlugFromPath();
   let observedPublicSoul = null;
   let publicMemorialTracked = false;
@@ -1716,7 +1910,7 @@
     ui.showBirthCue(!client.ownedEntityId && !incarnationBlocked);
     ui.setCameraAvailable(!!client.ownedEntityId && entities.tracked.has(client.ownedEntityId));
     if (client.ownedEntityId) ui.awaken();
-    if (returningEntityId && client.ownedEntityId === returningEntityId && !resumedReturningFish) {
+    if (!localVisual && returningEntityId && client.ownedEntityId === returningEntityId && !resumedReturningFish) {
       resumedReturningFish = true;
       stableCamera.enterRide();
     }
@@ -2083,6 +2277,7 @@
     if (entities.ownedEntityId) stableCamera.toggle();
   });
 
+  const orbitLightDirection = new THREE.Vector3();
   function updateCelestials(phase, t) {
     if (!window.__celestials) return;
     let earthPosition = null;
@@ -2115,7 +2310,7 @@
       }
     }
     if (celestialSunPosition) {
-      const direction = celestialSunPosition.clone().normalize();
+      const direction = orbitLightDirection.copy(celestialSunPosition).normalize();
       direction.y = Math.max(0.16, Math.abs(direction.y));
       direction.normalize();
       sun.position.copy(direction).multiplyScalar(170);
@@ -2185,15 +2380,15 @@
 
       if (window.__skyShader) window.__skyShader.uniforms.uTime.value = t;
       if (shoreUniforms) shoreUniforms.uTime.value = t;
-      if (window.__dome) {
-        window.__dome.mat.opacity = 0.1 + 0.04 * Math.sin(t * 0.8);
-        window.__dome.shellMat.opacity = 0.03 + 0.02 * Math.sin(t * 0.6);
-        window.__dome.ringMat.opacity = 0.25 + 0.08 * Math.sin(t * 1.2);
-      }
+      updatePondDome(t, reducedMotion);
+      updatePondWatercourse(t, reducedMotion);
+      updatePondForest(t, reducedMotion, sceneReedGust);
       updateCelestials(phase, t);
 
       if (window.__grassBlades && frameCountV2 % 5 === 0) {
         const reedGust = [...entities.natureEvents.values()].some((event) => event.kind === 'reed_gust' && event.endsAt > client.serverNow());
+        sceneReedGust = reedGust;
+        updatePondForest(t, reducedMotion, reedGust);
         for (const blade of window.__grassBlades) {
           blade.rotation.y = Math.atan2(camera.position.x - blade.position.x, camera.position.z - blade.position.z);
           if (!blade.userData.isBush) blade.rotation.z = Math.sin(t * (reedGust ? 2.4 : 1.5) + blade.userData.phase) * blade.userData.swayAmt * (reedGust ? 2.2 : 1);
@@ -2239,7 +2434,7 @@
     buildEnvironment();
     prewarmLegendaryFish();
     installLegendaryBenchmarkV2();
-    controls.autoRotate = !reducedMotion;
+    controls.autoRotate = !reducedMotion && !localVisual;
     client.connect();
     inspectSecureLink();
     animateV2();
@@ -2267,7 +2462,34 @@
       setTimeout(() => spawnBirdStrikeEvent(Math.floor(client.serverNow() / 45000)), 1200);
     }
     if (localDebug && debugEvent === 'frogs') {
+      controls.minDistance = 10;
       setTimeout(() => spawnFrogFeedDebug(Math.floor(client.serverNow() / 45000)), 1200);
+    }
+    if (localVisual) {
+      controls.autoRotate = false;
+      lastInteract = Infinity;
+      if (localVisual === 'birds') {
+        controls.minDistance = 10;
+        camera.position.set(9, 8, 12);
+        controls.target.set(0, 0, 0);
+      } else {
+        camera.position.set(14, 78, 270);
+        controls.target.set(0, 0, 0);
+      }
+      controls.update();
+      stableCamera.freePosition.copy(camera.position);
+      stableCamera.freeTarget.copy(controls.target);
+      setTimeout(() => {
+        console.info('Pond visual budget', JSON.stringify({
+          quality: LOW_QUALITY ? 'mobile' : 'desktop',
+          drawCalls: renderer.info.render.calls,
+          triangles: renderer.info.render.triangles,
+          geometries: renderer.info.memory.geometries,
+          textures: renderer.info.memory.textures,
+          trees: window.__pondForest && window.__pondForest.trees,
+          grassClumps: window.__pondForest && window.__pondForest.grassClumps,
+        }));
+      }, 3500);
     }
   }
 

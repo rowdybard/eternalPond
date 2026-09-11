@@ -8,6 +8,7 @@ import {
   type EntityState,
   type LifeKind,
   type NormalizedPoint,
+  type NatureEvent,
 } from "@eternal-pond/shared";
 
 export interface SimEntity extends EntityState {
@@ -31,6 +32,19 @@ export interface CreateSoulFishInput {
 }
 
 const TAU = Math.PI * 2;
+
+// Long, staggered visits to the surface, with gentle dives between them. The
+// clock is absolute so reconnects and fast-forwarding preserve each fish's rhythm.
+export function fishDepthAt(kind: EntityKind, seed: number, now: number): number {
+  const period = 110_000 + (seed >>> 0) % 50_000;
+  const phase = (((now + (seed >>> 7) % period) % period) + period) % period / period;
+  const variation = ((seed >>> 11) % 1000) / 1000;
+  const dive = smoothstep((phase - 0.55) / 0.13) * (1 - smoothstep((phase - 0.84) / 0.16));
+  const shallow = 0.055 + variation * 0.045;
+  const deep = (kind === "soulFish" ? 0.24 : 0.28) + variation * 0.23;
+  const breathing = Math.sin(now / 1000 * 0.18 + (seed % 6283) / 1000) * 0.009;
+  return Math.max(0.045, shallow + (deep - shallow) * dive + breathing);
+}
 
 export interface BirdLifecycleTiming {
   flightMs: number;
@@ -83,7 +97,7 @@ export function createSoulFish(input: CreateSoulFishInput): SimEntity {
     label: input.label,
     x: input.x,
     z: input.z,
-    depth: 0.2 + random() * 0.18,
+    depth: fishDepthAt("soulFish", seed, input.now),
     heading: random() * TAU,
     speed: 0.005 + random() * 0.0025,
     size: 0.78 + random() * 0.22,
@@ -155,7 +169,7 @@ export function createWildEntity(kind: EntityKind, index: number, now: number): 
     label: null,
     x,
     z,
-    depth: defaults.depth,
+    depth: kind === "wildFish" || kind === "soulFish" ? fishDepthAt(kind, seed, now) : defaults.depth,
     heading: random() * TAU,
     speed: defaults.speed,
     size: defaults.size,
@@ -457,9 +471,16 @@ export function applySchooling(
   sequence: number,
   dtSeconds: number,
   now: number,
+  natureEvents: Iterable<NatureEvent> = [],
 ): SimEntity[] {
   const ordered = [...entities].map((entity) => ({ ...entity })).sort((a, b) => a.id.localeCompare(b.id));
   const swimmers = ordered.filter((entity) => entity.kind === "soulFish" || entity.kind === "wildFish");
+  const invitations = new Map<string, NatureEvent>();
+  const priority = (event: NatureEvent) => event.kind === "food_gathering" ? 2 : event.kind === "surface_school" ? 1 : 0;
+  const active = [...natureEvents].filter(event => event.startsAt <= now && event.endsAt > now
+    && (event.kind === "food_gathering" || event.kind === "surface_school" || event.kind === "fish_glint"))
+    .sort((a, b) => priority(a) - priority(b) || a.startsAt - b.startsAt || a.id.localeCompare(b.id));
+  for (const event of active) for (const id of event.targetIds) invitations.set(id, event);
   const grid = new Map<string, SimEntity[]>();
   for (const fish of swimmers) {
     const key = schoolCellKey(fish.x, fish.z);
@@ -525,15 +546,24 @@ export function applySchooling(
       desiredZ += (centerZ - fish.z) * 0.34;
     }
 
+    const invitation = invitations.get(fish.id);
+    if (invitation && invitation.kind !== "fish_glint") {
+      const ordinal = invitation.targetIds.indexOf(fish.id);
+      const angle = ordinal / Math.max(1, invitation.targetIds.length) * TAU
+        + (now - invitation.startsAt) / 1000 * 0.14 + (invitation.seed % 6283) / 1000;
+      const radius = 0.012 + (fish.seed % 11) / 1000;
+      const targetX = invitation.x + Math.cos(angle) * radius;
+      const targetZ = invitation.z + Math.sin(angle) * radius;
+      const distance = Math.max(0.008, Math.hypot(targetX - fish.x, targetZ - fish.z));
+      desiredX = desiredX * 0.24 + (targetX - fish.x) / distance * 2.8;
+      desiredZ = desiredZ * 0.24 + (targetZ - fish.z) / distance * 2.8;
+    }
     const desiredHeading = wrapAngle(Math.atan2(desiredZ, desiredX));
-    const turnLimit = (fish.kind === "wildFish" ? 0.24 : 0.16) * safeDt;
+    const turnLimit = (invitation ? 0.85 : fish.kind === "wildFish" ? 0.24 : 0.16) * safeDt;
     fish.heading = wrapAngle(fish.heading + clampTurn(shortestAngle(fish.heading, desiredHeading), turnLimit));
 
-    const depthSeed = ((fish.seed >>> 11) % 1000) / 1000;
-    const baseDepth = fish.kind === "soulFish" ? 0.2 + depthSeed * 0.2 : 0.25 + depthSeed * 0.34;
-    const depthWave = Math.sin(now / 1000 * 0.045 + fish.seed * 0.0007 + sequence * 0.003) * 0.055;
-    const targetDepth = Math.max(0.13, Math.min(0.68, baseDepth + depthWave));
-    fish.depth += (targetDepth - fish.depth) * Math.min(1, safeDt * 0.22);
+    const targetDepth = invitation ? 0.055 + (fish.seed % 20) / 1000 : fishDepthAt(fish.kind, fish.seed, now);
+    fish.depth += (targetDepth - fish.depth) * Math.min(1, safeDt * (invitation ? 0.55 : 0.30));
   }
   return ordered;
 }
@@ -551,6 +581,7 @@ export function fastForwardEntity(entity: SimEntity, toTime: number): SimEntity 
   const angle = seedAngle + elapsedSeconds * angularSpeed;
   const next = {
     ...entity,
+    depth: entity.kind === "wildFish" || entity.kind === "soulFish" ? fishDepthAt(entity.kind, entity.seed, toTime) : entity.depth,
     x: 0.5 + Math.cos(angle) * radius,
     z: 0.5 + Math.sin(angle) * radius,
     heading: wrapAngle(angle + Math.PI / 2),

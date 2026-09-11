@@ -5,14 +5,21 @@
     'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',
     'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js',
     'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js',
-    'pond3d.js?v=3.2.1',
-    'pond-runtime-v2.js?v=3.2.1',
+    'pond3d.js?v=3.3.0',
+    'pond-surface-textures.js?v=3.3.0',
+    'pond-watercourse.js?v=3.3.0',
+    'pond-forest.js?v=3.3.0',
+    'pond-runtime-v2.js?v=3.3.0',
   ];
 
   function loadScript(source) {
     return new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      const absoluteSource = new URL(source, document.baseURI).href;
+      const scriptUrl = new URL(source, document.baseURI);
+      if ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') && scriptUrl.origin === location.origin) {
+        scriptUrl.searchParams.set('dev', String(Date.now()));
+      }
+      const absoluteSource = scriptUrl.href;
       let executionError = null;
 
       function captureExecutionError(event) {
@@ -26,7 +33,7 @@
       }
 
       script.async = false;
-      script.src = source;
+      script.src = absoluteSource;
       script.addEventListener('load', () => {
         cleanup();
         if (executionError) reject(executionError);

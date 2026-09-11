@@ -29,6 +29,7 @@ export interface EntityRuntimeState {
   mode?: FrogMode | BirdMode | "returning";
   growthScale?: number;
   feedCount?: number;
+  feedingFromMode?: FrogMode;
   targetAnchor?: number;
   nextActionAt?: number;
   returningAt?: number;
@@ -275,6 +276,7 @@ export interface RitualEvent {
 
 export type NatureEventKind =
   | "fish_glint"
+  | "surface_school"
   | "frog_hop"
   | "frog_call"
   | "frog_feed"

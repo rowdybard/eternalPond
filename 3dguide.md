@@ -7,6 +7,9 @@ This is the active guide for the canonical remaster. It preserves Fable's author
 ```text
 frontend/index.html                Authored page shell and minimal controls
 frontend/pond3d.js                 Fable scene, water, dome, assets, procedural models
+frontend/pond-surface-textures.js   Shared natural material maps and world mapping
+frontend/pond-watercourse.js        Exterior waterfall and connected tributary
+frontend/pond-forest.js             Instanced branching trees and wind-driven foliage
 frontend/pond-runtime-v2.js        Protocol-3 scene adapter, interpolation, nature, camera
 frontend/pond-client-v2.js         Identity, reconnect, clock sync, ripple batching
 frontend/pond-ui.js                Wordmark, presence, camera control, hidden ledger
@@ -56,6 +59,30 @@ v2/worker/src/queue.ts             Returning-life priority and FIFO birth queue
 - Fish labels stay permanent for the visitor, visible nearby, and condense into school counts when distant overlaps become unreadable.
 - Never add per-creature lights. Changing the active Three.js light shape can trigger broad shader recompilation.
 
+### Natural environment pass
+
+- Preserve Fable's pond material, wave equations, palette, transparency, shoreline
+  swash and underwater bowl. The shoreline has a narrow opening at the tributary
+  mouth; dry land alone receives the new ground texture. Do not add a second
+  horizontal water disc or recolor the pond through orbital lighting updates.
+- The exterior waterfall rises roughly 146 world units above its plunge pool.
+  Falling sheets remain outside the 315.36-unit dome. A roughly 244-unit stream
+  flows downhill to the pond. Its optical helper reproduces Fable's water response
+  and shares the original water uniform objects. Falling water adds advected foam,
+  surface flutter and bounded GPU spray in five draws.
+- All trees use four branching prototypes, bark detail and one transparent leaf
+  atlas. Trees, shrubs, grass, reeds and contact shadows use instancing, with wind
+  evaluated on the GPU. Desktop uses 112 trees and 6,000 grass clumps; mobile uses
+  64 and 2,800. Vegetation reserves the watercourse and an unobstructed camera view.
+- Dome seams use one batch of camera-facing ribbons, with a bright core, soft
+  halo and travelling pulses. No bloom pass or additional lights are needed.
+- Ordinary fish use the existing instance batches with scale/gill shading and
+  curved fins. Birds use merged feather geometry and two wing joints per side.
+  Frogs retain their silly eyes and grin, with skin detail, breathing, blinking,
+  paddling and landing compression. Their movements remain render-only.
+- Reduced motion stops foliage wind, dome pulses and waterfall spray/advection.
+  Natural material sources are recorded in `frontend/assets/natural-materials.md`.
+
 ## 6. Capacity and protocol
 
 - Protocol 3 uses `/ws/v3` and `/api/v3/status`; `/v2` aliases remain during migration.
@@ -81,6 +108,9 @@ $env:POND_LOAD_WAVES='1'; $env:POND_ALLOW_PERSISTENT_LOAD='1'; npm run load:v2 -
 - Canvas spectator: `http://127.0.0.1:5173/?renderer=canvas`
 - Legendary benchmark: `http://127.0.0.1:5173/?benchmark=legendary`
 - Bird and frog visual diagnostics: `?event=birds` and `?event=frogs`
+- Fixed local overview: `?visual=overview`; bird wing close-up: `?visual=birds`.
+  Local visual mode logs the observed renderer draw/triangle counts once after
+  startup. It prevents returning-fish camera takeover while inspecting the scene.
 
 The diagnostics are localhost-only and never mutate shared ecology. Do not run the live load harness against production; use an isolated preview Durable Object.
 

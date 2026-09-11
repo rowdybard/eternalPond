@@ -1,0 +1,26 @@
+Natural foliage atlas
+Source: generated for Eternal Pond with the built-in imagegen tool, 2026-09-05.
+File: natural-foliage-atlas.png (1254 x 1254, RGBA; original alpha preserved).
+Usage: 2 x 2 atlas. Top left oak, top right birch, bottom left willow,
+bottom right cedar. Alpha-tested, depth-writing leaf sprays on branching 3D
+tree meshes in pond-forest.js. This is not a whole-tree billboard texture.
+
+Final generation prompt:
+Use case: photorealistic-natural. Asset type: 2x2 alpha foliage atlas for
+physically based real-time tree canopy cards, individual botanical branch
+sprays, NOT whole trees. Generate a square 1024 x 1024 image with GENUINELY
+TRANSPARENT background (alpha), no background color and no baked drop shadow.
+Four isolated leaf sprays, one per equal quadrant with generous transparent
+gutters: top left a European oak terminal twig bearing 12-18 small irregular
+muted sage/olive green lobed oak leaves; top right a silver birch twig with
+18-28 small triangular green leaves; bottom left a willow spray of many fine
+narrow hanging grey-green lanceolate leaves; bottom right a fern-like
+cedar/conifer bough with many fine dark evergreen needles. Each spray branching
+outward from a thin woody stem near bottom center of its quadrant, naturally
+irregular openwork silhouette, visible gaps between leaves, full spray
+uncropped, occupying ~80 percent of quadrant. Real plant photographic surface
+detail, leaf veins and tiny weathering; diffuse neutral overcast illumination,
+subdued natural low-saturation green albedo, consistent detail and scale.
+Orthographic straight-on botanical specimen cutouts suitable for GPU alpha-test
+planes. No pots, no ground, no text, no borders, no labels, no sun highlights,
+no cartoon, no rounded blobs, no full trees.
